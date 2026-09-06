@@ -1,0 +1,15 @@
+# Orchestrator (Process 1)
+websockets
+python-dotenv
+
+# Task engine + sim (Processes 2 & 3)
+mujoco
+stretch_mujoco
+numpy
+pandas
+
+# Telephony (add when starting Day 15 work)
+# twilio
+
+# Audio test tooling (RQ1/RQ2)
+sounddevice

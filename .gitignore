@@ -1,0 +1,9 @@
+.env
+*.env
+__pycache__/
+*.pyc
+audio_tests/recordings/*
+!audio_tests/recordings/.gitkeep
+demo/*.mp4
+demo/*.mov
+.venv/
