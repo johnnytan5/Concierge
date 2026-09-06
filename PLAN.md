@@ -29,72 +29,51 @@ No manipulation anywhere in that loop. Manipulation is the single largest time s
 
 ---
 
-## 3. Robot model selection
+## 3. Robot model — decision record
 
-### Option A — Hello Robot Stretch 3 (recommended)
+**Decision: custom cabinet-bot MJCF** (`sim/delivery_bot_v2.xml` +
+`sim/concierge_sim.py`), not Hello Robot Stretch 3.
 
-In MuJoCo Menagerie as `hello_robot_stretch`, and more importantly there is a first-party wrapper, `hello-robot/stretch_mujoco`, that hands you the whole control layer.
+Stretch 3 via `stretch_mujoco` was the original plan (full A/B/C
+comparison is in this file's git history if it's ever needed again), and
+its install/behaviour checked out clean — `pip install
+git+https://github.com/hello-robot/stretch_mujoco.git` worked first try,
+and `sim.start(headless=True)` drove the base correctly at ~0.93x
+realtime. This was **not** a broken-install fallback. It was a scope call
+made once the real question got asked: a differential-drive delivery
+cart doesn't need Stretch's arm, lift, head, or RGB-D cameras, and the
+custom model is simpler to reason about end-to-end for a bin-loading-only
+interaction.
 
-Why it wins for this project:
+**What's built:**
+- Skeleton: two zaxis-aligned side wheels + one frictionless rear support
+  point, driven through a coupled forward/turn tendon — lifted verbatim
+  from MuJoCo's own `model/car/car.xml` (the wheel-rolling trick that
+  "just worked" with zero tuning). The visible shell rebuilt around it as
+  a tall Pudu/Keenon-style cabinet.
+- Bin-loading interaction: a two-panel vertical-slide door
+  (`open_door()` / `close_door()` / `set_door_fraction()`), not a
+  swinging lid — both panels stay within the robot's footprint, so a
+  guest standing at the door is never in its path.
+- Control: `drive(v, omega)` takes real m/s / rad/s. The underlying
+  actuators are force-controlled (`motor`, not `velocity`), so this
+  required an empirical ctrl→force calibration (`CTRL_PER_MPS=50.0`,
+  `CTRL_PER_RADPS≈12.0` — fit by holding ctrl steady and reading settled
+  `linear_vel`/`angular_vel`; see `concierge_sim.py`'s module comment).
+  Physical top speed is ~0.16 m/s / ~0.67 rad/s at full `ctrlrange` — over
+  the 90s delivery budget that's ~14m of travel, plenty for one corridor.
+- Two real bugs found and fixed during verification, worth knowing about
+  if the model is ever retuned: the bottom door panel closes against
+  gravity and was settling ~31% short of shut (a position actuator's
+  steady-state offset under a constant force is `weight/kp`; fixed by
+  raising kp 200→3000, kv 20→80 — verified residual <0.001m after the
+  fix); and `drive()`'s v/omega were originally raw `ctrl` values, not
+  real units, silently ~50x slower than documented.
 
-- Mobile manipulator: differential-drive base **plus** a prismatic lift, a 4-segment telescoping arm, wrist DoFs and a gripper. It degrades gracefully — you can ignore the arm entirely and still have a delivery robot, or use it if time allows.
-- The Python API maps almost one-to-one onto voice agent tool calls:
-
-```python
-from stretch_mujoco import StretchMujocoSimulator
-sim = StretchMujocoSimulator()
-sim.start(headless=False)
-sim.set_base_velocity(0.3, -0.1)     # v_linear, v_angular
-sim.move_to('lift', 1.0)
-sim.move_by('base_translate', 0.1)
-sim.wait_until_at_setpoint('lift')
-sim.pull_status()                     # all joint pos/vel
-sim.pull_sensor_data()                # gyro, accel, 2D lidar rangefinder
-sim.pull_camera_data()                # calibrated RGB + depth
-```
-
-- Ships with RGB-D cameras, a 2D spinning lidar, headless mode for speed, and a viewer for the demo video.
-- Spawns into RoboCasa environments — hundreds of pre-built interior scenes with real furniture assets. Far better looking than anything you will build from primitives in a week.
-- Models live in `stretch_mujoco/models/`: `stretch.xml` (robot), `scene.xml` (robot + dock + table + objects + floor), `docking_station.xml`, plus `assets/` with meshes and textures.
-
-### Option B — Booster T1 (do not use for this hackathon)
-
-`booster_t1` is in Menagerie: 23 DoF, Apache-2.0, derived from the public `t1_serial.urdf`, with a freejoint on the trunk, IMU site and sensors, position actuators with kp/kv semantics, and frictionloss/armature added for stability.
-
-The story value is obvious given your RCAP work and the lab's six T2s. But a 23-DoF humanoid needs a walking policy before it can deliver anything, and that is a month of work on its own. Attempting it here will sink both this and your Macau preparation.
-
-Correct move: ship Stretch for the hackathon, and keep "retarget the delivery behaviour onto T1/T2" as the follow-on that feeds Macau and a possible paper. They share a MuJoCo backbone, so the task layer transfers.
-
-### Option C — custom cabinet bot (fallback)
-
-If Stretch's install or physics gives you trouble, an authentic Keenon-style robot is roughly 80 lines of MJCF: a box body with a `freejoint`, two hinge-driven wheels with velocity actuators, two spherical casters, a hinged lid, and a `site` for the payload bin. No meshes needed. This is the lowest-risk path and it looks *more* like the real thing, not less.
-
-### Extracting joint parameters
-
-Do not copy numbers from documentation. Dump them from the compiled model — this is also the table you will want in your writeup:
-
-```python
-import mujoco, pandas as pd
-m = mujoco.MjModel.from_xml_path("stretch_mujoco/models/scene.xml")
-
-rows = []
-for i in range(m.njnt):
-    name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, i)
-    rows.append({
-        "joint": name,
-        "type": ["free", "ball", "slide", "hinge"][m.jnt_type[i]],
-        "limited": bool(m.jnt_limited[i]),
-        "range_lo": m.jnt_range[i][0],
-        "range_hi": m.jnt_range[i][1],
-        "axis": m.jnt_axis[i].tolist(),
-        "damping": m.dof_damping[m.jnt_dofadr[i]],
-        "armature": m.dof_armature[m.jnt_dofadr[i]],
-        "frictionloss": m.dof_frictionloss[m.jnt_dofadr[i]],
-    })
-print(pd.DataFrame(rows).to_markdown(index=False))
-```
-
-Add a second pass over `m.nu` actuators for `actuator_ctrlrange`, `actuator_gainprm` (kp) and `actuator_biasprm` (kv) — those are what you actually tune when motion looks wrong.
+Booster T1 stays out of scope for the reason it always was — a 23-DoF
+humanoid needs a walking policy before it can deliver anything, and
+that's a month of work this project doesn't have. "Retarget onto T1/T2"
+remains the follow-on for Macau/a paper, not this hackathon.
 
 ---
 
@@ -102,10 +81,10 @@ Add a second pass over `m.nu` actuators for `actuator_ctrlrange`, `actuator_gain
 
 Five, in build order. Scenarios 1, 2 and 4 are the demo; 3 and 5 are the depth that separates you from the field.
 
-### S1 — Inbound phone request (the hook)
-Guest in 1204 dials the hotel number, which is a Twilio SIP trunk bound to your agent. "Hi, can I get two extra towels sent up?" Agent confirms the room from the caller record, calls `dispatch_delivery`, states an ETA, and ends the call. The robot starts moving in the viewer before the call has ended.
+### S1 — Inbound request (the hook)
+Guest in 1204 speaks into the front-desk line — a local mic/speaker session against the Voice Agent API, framed narratively as a phone call for the demo; no Twilio/SIP, see Section 5. "Hi, can I get two extra towels sent up?" Agent confirms the room, calls `dispatch_delivery`, states an ETA, and ends the call. The robot starts moving in the viewer before the call has ended.
 
-*Why it matters:* judges can literally call your number. Almost nobody else will make theirs callable.
+*Why it matters:* the submission is a demo video, not a live judge dial-in, so a literal phone number doesn't pay off the way it would in live judging — the real differentiator survives untouched: the tool call has genuine state, latency, and failure behind it, live, in the same run as the video. Nobody else's stub-JSON tools do that.
 
 ### S2 — Front-desk multi-order handoff
 A human receptionist speaks to the robot at the desk: "Okay, this one goes to twelve-oh-four, and the noodles are for oh-eight-oh-three." Two items, two destinations, spoken in one breath, with room numbers as digits. Exercises `keyterms` biasing hard, and produces a queue rather than a single task.
@@ -130,7 +109,7 @@ Robot reaches the door and triggers an outbound announcement: "Your delivery is 
 Three processes. The separation is not optional — a blocking `mj_step` inside your WebSocket event loop will destroy voice latency, which is the one thing you cannot afford to break.
 
 ```
-  Guest phone ──SIP──> Twilio trunk
+  Guest mic/speaker (local — simulated front-desk line, no Twilio/SIP)
                           │
                           ▼
               AssemblyAI Voice Agent API
@@ -164,11 +143,11 @@ Three processes. The separation is not optional — a blocking `mj_step` inside 
 
 | Layer | Choice | Note |
 |---|---|---|
-| Voice | AssemblyAI Voice Agent API | Stored agent via `POST /v1/agents`, bind by `agent_id` |
-| LLM | Claude via the AssemblyAI gateway (`byo-llm`) | Path 1 does *not* cost you LLM control |
-| Telephony | Twilio SIP trunk | No media server, no webhook; env vars only |
-| Physics | MuJoCo 3.x + `stretch_mujoco` | Python 3.10 |
-| Scenes | RoboCasa assets, or hand-built MJCF corridor | Corridor + 3 doors is enough |
+| Voice | AssemblyAI Voice Agent API | Inline `session.update` config (not a stored agent) — see `orchestrator/agent.py` |
+| LLM | Claude via the AssemblyAI gateway (`byo-llm`) | `llm: [{base_url, model, api_key}]` in session config; Path 1 does *not* cost you LLM control |
+| Call input | Local mic/speaker (simulated front-desk line) | No Twilio/SIP — raw API key + `Bearer` header, no browser/token needed |
+| Physics | MuJoCo 3.x + custom cabinet-bot MJCF | `sim/delivery_bot_v2.xml` + `sim/concierge_sim.py`, Python 3.10 |
+| Scenes | Hand-built MJCF corridor | Corridor + 3 doors is enough — pending, Day 8-14 |
 | Nav | Waypoint graph + pure pursuit | **Not** Nav2, **not** SLAM |
 | Recording | Session artifacts API + MuJoCo offscreen render | Free demo material |
 
@@ -213,10 +192,10 @@ The `turn-taking` sample agent exposes silence thresholds and interruption sensi
 
 | Days | Milestone | Hard gate |
 |---|---|---|
-| 1–3 | Both halves alive *independently*: starter agent talking in browser; Stretch driving in the viewer. Run RQ1. | If code-switching WER is unusable, pivot the language angle now |
+| 1–3 | Both halves alive *independently*: orchestrator talking to the Voice Agent API (local mic/speaker); cabinet-bot driving in the viewer. Run RQ1. | If code-switching WER is unusable, pivot the language angle now |
 | 4–7 | **Vertical slice**: one spoken sentence → `dispatch_delivery` → robot visibly moves | **If this is not working on Day 7, cut manipulation permanently** |
 | 8–14 | Hotel scene, waypoint nav, task queue, all six tools, S1 + S2 end to end | |
-| 15–20 | Twilio number live. `keyterms` + turn-taking tuning. RQ2, RQ3, RQ4. S3 recorded. | |
+| 15–20 | `keyterms` + turn-taking tuning against a live key. RQ2, RQ3, RQ4. S3 recorded. | |
 | 21–25 | S4 and S5. Failure handling. Rehearse the full run three times. | |
 | 26–28 | Demo video, writeup with the WER charts, submission | Submit by Day 28, not Day 30 |
 
@@ -229,7 +208,7 @@ Days 29–30 are buffer. Something will break.
 | Risk | Mitigation |
 |---|---|
 | Sim blocks the voice loop | Separate processes from day one, not as a later refactor |
-| `stretch_mujoco` install friction | Timebox to half a day, then fall back to Option C cabinet bot |
+| Custom MJCF actuator/tuning surprises | Verify empirically — measure settled velocity/position, don't assume documented units. Already caught two real bugs (door gravity droop, `drive()` units 50x off) before they hit `nav.py` |
 | Manipulation eats the month | Day 7 gate. Bin-loading is the default, not the fallback |
 | Code-switching underperforms | RQ1 on day 1–3; if weak, pivot the story to noise robustness and keyterms |
 | Macau RCAP prep + FYP collision | Hard-cap this at evenings and weekends. Do not touch T1 locomotion |
@@ -245,4 +224,4 @@ Days 29–30 are buffer. Something will break.
 4. Elevator / multi-floor. Single corridor.
 5. S5 failure handling.
 
-Do not cut, under any circumstances: the phone number, the code-switched scenario, or the mid-flight amendment. Those three are the entire submission.
+Do not cut, under any circumstances: the code-switched scenario, or the mid-flight amendment. Those two are the entire submission. (The literal phone number *was* cut, deliberately — the submission is a demo video, not live judge dial-in, so callability doesn't pay off; the simulated mic session keeps the actual differentiator — real backend state — without the SIP risk. See Section 3/5.)

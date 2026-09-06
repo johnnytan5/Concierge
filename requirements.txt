@@ -1,15 +1,19 @@
+# Install with `uv pip install -r requirements.txt`, NOT `uv pip sync` —
+# sync was observed pruning real transitive deps this file relies on
+# (cffi's own pycparser dependency, specifically) as if they were unlisted
+# cruft. Plain `install` resolves and keeps them correctly.
+
 # Orchestrator (Process 1)
 websockets
 python-dotenv
+sounddevice
+cffi    # sounddevice's hard dependency — pinned explicitly, not left implicit
+numpy
 
 # Task engine + sim (Processes 2 & 3)
 mujoco
-stretch_mujoco
-numpy
+glfw    # mujoco.viewer imports this unconditionally, even for headless=True
 pandas
 
-# Telephony (add when starting Day 15 work)
-# twilio
-
 # Audio test tooling (RQ1/RQ2)
-sounddevice
+# sounddevice already listed above (orchestrator uses it too, for mic/speaker I/O)

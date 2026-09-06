@@ -1,0 +1,264 @@
+<mujoco model="concierge_delivery_bot_v2">
+  <!--
+    Built on the skeleton of MuJoCo's own model/car/car.xml (proven working:
+    two zaxis-aligned side wheels + one frictionless nose support point,
+    driven through a coupled forward/turn tendon). That skeleton is kept
+    as-is; only the visible shell and scale have changed, from a small
+    flat wedge to a tall Pudu/Keenon-style delivery cabinet on wheels.
+  -->
+  <compiler autolimits="true"/>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512"
+              rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
+    <material name="shell_white" rgba="0.95 0.95 0.97 1"/>
+    <material name="shell_accent" rgba="0.1 0.45 0.85 1"/>
+    <material name="screen_dark" rgba="0.05 0.05 0.08 1"/>
+  </asset>
+
+  <default>
+    <joint damping="1.5" actuatorfrcrange="-15 15"/>
+    <default class="wheel">
+      <geom type="cylinder" size="0.06 0.02" rgba="0.15 0.15 0.15 1"/>
+    </default>
+    <default class="decor">
+      <site type="box" rgba="0.5 1 0.5 1"/>
+    </default>
+    <default class="shell">
+      <geom contype="0" conaffinity="0" group="2"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <geom type="plane" size="3 3 .01" material="grid"/>
+
+    <body name="robot" pos="0 0 0.09">
+      <freejoint/>
+      <light name="top light" pos="0 0 2.5" mode="trackcom" diffuse=".7 .7 .7" ambient=".3 .3 .3"/>
+      <light name="fill light" pos="1.5 -1 1.2" dir="-1 1 -0.5" diffuse=".5 .5 .5"/>
+
+      <!-- Rear support point: same role as car.xml's "front wheel" sphere —
+           frictionless, load-bearing only, not driven. Placed at the rear
+           since the two driven wheels now sit further forward under the
+           tower's center of mass. -->
+      <geom name="rear_support" pos="-0.16 0 -0.055" type="sphere" size="0.035"
+            condim="1" priority="1"/>
+
+      <!-- Low chassis deck, same height band as car.xml's chasis mesh but
+           now a simple box since the visible shell above does the visual
+           work. Kept light and out of the collision-mass budget calc via
+           explicit inertial below. -->
+      <geom name="chassis" type="box" pos="0 0 0" size="0.19 0.16 0.03" class="shell" material="shell_white"/>
+      <geom name="chassis_collision" type="box" pos="0 0 0" size="0.19 0.16 0.03" rgba="0 0 0 0" group="3"/>
+
+      <!-- Driven side wheels: same zaxis trick as car.xml. This is the
+           single most important line carried over — it's what made the
+           reference file's wheels roll correctly with zero tuning, versus
+           the euler-rotation approach in the first attempt which spun the
+           wheel like a flipped coin. -->
+      <body name="left_wheel" pos="0.02 0.19 -0.03" zaxis="0 1 0">
+        <joint name="left"/>
+        <geom class="wheel"/>
+        <site class="decor" size="0.006 0.05 0.02"/>
+        <site class="decor" size="0.05 0.006 0.02"/>
+      </body>
+      <body name="right_wheel" pos="0.02 -0.19 -0.03" zaxis="0 1 0">
+        <joint name="right"/>
+        <geom class="wheel"/>
+        <site class="decor" size="0.006 0.05 0.02"/>
+        <site class="decor" size="0.05 0.006 0.02"/>
+      </body>
+
+      <!-- Visible shell: tall rounded cabinet, replacing car.xml's wedge
+           mesh entirely. This is pure cosmetics — none of these geoms
+           carry collision (class="shell" -> contype/conaffinity 0) so
+           they cannot introduce the belly-drag bug from the first attempt.
+           A single separate collision box (tower_collision) stands in for
+           the whole tower so the robot can still bump into walls/doors. -->
+      <body name="tower" pos="0 0 0.03">
+        <inertial pos="0 0 0.35" mass="14" diaginertia="0.7 0.7 0.18"/>
+
+        <!-- Lower cabinet: NOT a solid cylinder — a hollow compartment
+             built from wall panels, so there is an actual cavity behind
+             the lid for a payload to sit in and be retrieved from. The
+             visible cylindrical silhouette is now an OUTER shell only;
+             a separate inner box geom is subtracted conceptually by
+             simply not filling the space — MuJoCo has no boolean
+             subtraction, so this is built as a thin-walled box cavity
+             (front/back/left/right walls + floor), sized to fit inside
+             the cylinder's silhouette, with a gap on -y where the lid
+             (below) is the only thing that closes it off. -->
+
+        <!-- Outer shell walls (thin panels standing in for the rounded
+             cylinder look from outside; kept as 4 flat panels rather
+             than a true cylinder shell because MuJoCo has no hollow-
+             cylinder primitive and a true curved-wall cavity would need
+             a mesh asset, which is unnecessary detail for this build) -->
+        <geom name="wall_back"  type="box" pos="0 0.135 0.22" size="0.15 0.03 0.20" material="shell_white" class="shell"/>
+        <geom name="wall_left"  type="box" pos="0.135 0 0.22" size="0.03 0.135 0.20" material="shell_white" class="shell"/>
+        <geom name="wall_right" type="box" pos="-0.135 0 0.22" size="0.03 0.135 0.20" material="shell_white" class="shell"/>
+        <geom name="wall_floor" type="box" pos="0 0 0.03" size="0.15 0.135 0.02" material="shell_white" class="shell"/>
+        <geom name="wall_ceiling" type="box" pos="0 0 0.41" size="0.15 0.135 0.02" material="shell_white" class="shell"/>
+        <!-- -y side is deliberately open: that's the compartment mouth
+             the lid below covers when closed -->
+
+        <!-- Rounded outer skin, cosmetic only (no collision, sits just
+             outside the wall panels so the compartment cavity is
+             invisible from outside but the robot still reads as a
+             cylinder in silhouette) -->
+        <geom name="tower_lower_skin" type="cylinder" pos="0 0.02 0.22" size="0.19 0.20"
+              material="shell_white" class="shell" rgba="0.95 0.95 0.97 0.0"/>
+
+        <geom name="accent_ring_low" type="cylinder" pos="0 0 0.30" size="0.172 0.012"
+              material="shell_accent" class="shell"/>
+
+        <!-- Mid section: same radius as lower, no visible seam/step -->
+        <geom name="tower_mid" type="cylinder" pos="0 0 0.46" size="0.155 0.05"
+              material="shell_white" class="shell"/>
+        <geom name="accent_ring_mid" type="cylinder" pos="0 0 0.51" size="0.157 0.01"
+              material="shell_accent" class="shell"/>
+
+        <!-- Upper head unit: narrower cylinder capped with a dome, so the
+             screen sits ON the head unit itself rather than floating on a
+             separate box below it -->
+        <geom name="tower_upper" type="cylinder" pos="0 0 0.63" size="0.12 0.09"
+              material="shell_white" class="shell"/>
+        <geom name="tower_head" type="sphere" pos="0 0 0.72" size="0.12"
+              material="shell_white" class="shell"/>
+
+        <!-- Face/screen: curved band on the head unit, angled slightly
+             upward the way Pudu/Keenon screens are, sized to read as a
+             face rather than a panel -->
+        <geom name="screen" type="box" pos="0.108 0 0.635" size="0.02 0.075 0.075"
+              material="screen_dark" class="shell"/>
+
+        <!-- Single collision proxy standing in for the whole visible tower.
+             Kept solid for collision purposes (the robot bumping into a
+             wall doesn't need the cavity to be physically real, only
+             visually real) -->
+        <geom name="tower_collision" type="cylinder" pos="0 0 0.45" size="0.17 0.42"
+              rgba="0 0 0 0" group="3"/>
+
+        <!-- Demo payload: a visible box sitting inside the compartment,
+             representing towels/a food tray. Purely cosmetic (no
+             collision) — this is what makes the cavity actually readable
+             as storage rather than an empty shell. In the real system
+             this would be swapped or hidden based on task state (loaded/
+             empty), driven by the task engine, not hardcoded like this. -->
+        <geom name="payload_demo" type="box" pos="0 0.02 0.27" size="0.12 0.09 0.09"
+              rgba="0.85 0.25 0.15 1" class="shell"/>
+
+        <!-- Hinged lid: a curved panel flush against the lower cabinet's
+             -y side when closed (angle=0), swinging up and outward when
+             open. The body sits at the hinge axis, ON the cylinder's
+             surface (radius 0.17); the geom is centered at the body
+             origin, not offset outward, so at angle=0 it lies flat
+             against the tower rather than protruding like a shelf. -->
+        <!-- Sliding compartment door: replaces the hinged panel. Two fixed
+             guide rails flank the opening; the door itself has a single
+             slide joint (linear motion along local z) running inside
+             them, moving straight up to reveal the compartment rather
+             than swinging outward into the corridor. This matches how
+             real Pudu/Keenon units work — the door never leaves the
+             robot's footprint, so a guest standing in front of it to
+             collect their order is never in the door's path. It's also
+             simpler to get right in MJCF: a slide joint moves along one
+             straight line, so there is no arc to clear and no risk of
+             the door clipping the walls or payload mid-motion the way
+             the hinged version did. -->
+
+        <!-- Guide rails: fixed to the tower, flank the opening on both
+             sides, extend upward the full travel distance so the door
+             has somewhere to slide into -->
+        <!-- Sliding compartment door, split into two half-height panels
+             that retract in opposite directions (top panel up, bottom
+             panel down) — a single full-height slab would need its own
+             height's worth of clear space above the opening to disappear
+             into, which this tower doesn't have (tower_mid/upper/head
+             already occupy that space). Splitting the travel between two
+             panels halves the clearance each one needs. -->
+        <geom name="rail_left" type="box" pos="0.155 -0.16 0.34" size="0.012 0.02 0.19"
+              material="shell_white" class="shell"/>
+        <geom name="rail_right" type="box" pos="-0.155 -0.16 0.34" size="0.012 0.02 0.19"
+              material="shell_white" class="shell"/>
+
+        <!-- Top panel: covers the upper half of the opening (z 0.34 to
+             0.51), retracts upward into the space directly below
+             tower_mid's underside (tower_mid bottom edge = 0.46-0.05=0.41,
+             so it has ~0.10 of headroom below tower_mid to tuck into —
+             not the panel's full 0.17 height, so the panel is sized to
+             the available headroom instead of the full half-opening). -->
+        <body name="lid_top" pos="0 -0.17 0.305">
+          <joint name="lid_top_slide" type="slide" axis="0 0 1" pos="0 0 0"
+                 range="0 0.16" damping="8" actuatorfrcrange="-40 40"/>
+          <inertial pos="0 0 0" mass="0.25" diaginertia="0.003 0.003 0.001"/>
+          <geom name="lid_top_geom" type="box" pos="0 0 0" size="0.155 0.012 0.085"
+                material="shell_accent" class="shell"/>
+          <geom name="lid_top_collision" type="box" pos="0 0 0" size="0.155 0.012 0.085"
+                rgba="0 0 0 0" group="3"/>
+        </body>
+
+        <!-- Bottom panel: covers the lower half of the opening (z 0.17 to
+             0.34), retracts downward toward the floor. wall_floor sits at
+             z 0.03 with half-height 0.02 (top edge 0.05), giving this
+             panel room to slide down without hitting the floor panel. -->
+        <body name="lid_bottom" pos="0 -0.17 0.135">
+          <!-- lid_bottom_slide closes by moving UP against gravity (unlike
+               lid_top_slide, which closes with gravity assisting) — its
+               position actuator must fight the panel's own weight to fully
+               seat at qpos=0. A position actuator's steady-state offset
+               under a constant disturbance force is offset = F/kp; at the
+               original kp=200 that put the panel ~0.0123m short of closed
+               (2.45N / 200), 31% of its 0.04m travel — visibly "still open"
+               in a demo. kp=3000/kv=80 (same damping ratio as before,
+               scaled for the new kp) brings the predicted residual under
+               0.001m. See concierge_sim.py's DOOR_BOTTOM_RANGE_M comment
+               for the measured verification. -->
+          <joint name="lid_bottom_slide" type="slide" axis="0 0 -1" pos="0 0 0"
+                 range="0 0.04" damping="8" actuatorfrcrange="-40 40"/>
+          <inertial pos="0 0 0" mass="0.25" diaginertia="0.003 0.003 0.001"/>
+          <geom name="lid_bottom_geom" type="box" pos="0 0 0" size="0.155 0.012 0.085"
+                material="shell_accent" class="shell"/>
+          <geom name="lid_bottom_collision" type="box" pos="0 0 0" size="0.155 0.012 0.085"
+                rgba="0 0 0 0" group="3"/>
+        </body>
+
+        <site name="payload_site" pos="0 0 0.30" size="0.02" rgba="1 0 0 0.3"/>
+      </body>
+
+      <site name="base_imu" pos="0 0 0" size="0.01"/>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <fixed name="forward">
+      <joint joint="left" coef=".5"/>
+      <joint joint="right" coef=".5"/>
+    </fixed>
+    <fixed name="turn">
+      <joint joint="left" coef="-.5"/>
+      <joint joint="right" coef=".5"/>
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <motor name="forward" tendon="forward" ctrlrange="-8 8"/>
+    <motor name="turn" tendon="turn" ctrlrange="-8 8"/>
+    <position name="lid_top_pos" joint="lid_top_slide" kp="200" kv="20" ctrlrange="0 0.16"/>
+    <position name="lid_bottom_pos" joint="lid_bottom_slide" kp="3000" kv="80" ctrlrange="0 0.04"/>
+  </actuator>
+
+  <sensor>
+    <jointactuatorfrc name="right" joint="right"/>
+    <jointactuatorfrc name="left" joint="left"/>
+    <gyro name="base_gyro" site="base_imu"/>
+    <accelerometer name="base_accel" site="base_imu"/>
+    <jointpos name="lid_top_position" joint="lid_top_slide"/>
+    <jointpos name="lid_bottom_position" joint="lid_bottom_slide"/>
+  </sensor>
+
+  <keyframe>
+    <key name="home" qpos="0 0 0.09 1 0 0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>

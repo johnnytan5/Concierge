@@ -20,11 +20,18 @@ that override convenience every time.
    surfaces later as a separate agent turn or outbound event, never as the
    return value of the dispatching call.
 
-3. **Robot platform: Hello Robot Stretch 3 via `stretch_mujoco`.** Not
-   Booster T1, not a humanoid. If `stretch_mujoco` install/behaviour is
-   broken and can't be fixed within half a day, fall back to the custom
-   cabinet-bot MJCF (see PLAN.md Option C) — do not silently switch to a
-   humanoid or spend more than half a day fighting the install.
+3. **Robot platform: custom cabinet-bot MJCF (`sim/delivery_bot_v2.xml` +
+   `sim/concierge_sim.py`).** Not Stretch 3 / `stretch_mujoco` — that was
+   tried, installed cleanly, and drove correctly in the viewer; dropped
+   anyway because a differential-drive delivery cart doesn't need
+   Stretch's arm/lift/head/cameras, and the custom model is simpler to
+   reason about end-to-end. Not Booster T1, not a humanoid, for the
+   reason that never changed: a walking policy is a month of work this
+   project doesn't have. Two tendon-coupled wheels (car.xml skeleton) plus
+   a two-panel vertical-slide door for bin-loading. `drive(v, omega)`
+   takes real m/s/rad-s — calibrated against the model's force-controlled
+   actuators; see `concierge_sim.py`'s module comment before assuming the
+   ctrl-to-velocity ratio still holds if the model changes.
 
 4. **Manipulation is a stretch goal behind a Day-7 gate, never the
    critical path.** Default interaction is bin-loading (human loads a
@@ -41,7 +48,10 @@ that override convenience every time.
 
 6. **LLM via AssemblyAI's gateway (`byo-llm` pointing at their Claude
    gateway), not a separately hosted endpoint**, unless a specific reason
-   to switch comes up. Less plumbing, same model control.
+   to switch comes up. Less plumbing, same model control. This requires a
+   **stored agent** (`POST /v1/agents`) — confirmed live that inline
+   `session.update` rejects `llm` outright. See `orchestrator/agent.py`'s
+   `ensure_agent()` and ARCHITECTURE.md for the exact request shape.
 
 ## Tool schema (contract — keep orchestrator and task engine in sync)
 
