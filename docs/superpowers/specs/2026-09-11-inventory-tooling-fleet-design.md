@@ -135,6 +135,18 @@ table is an output (state task_engine writes to), not an input config.
 
 ## Tool changes (`orchestrator/tools.py`)
 
+`check_menu` and `dispatch_delivery` share one internal helper,
+`_lookup_items(names) -> list[{name, category, price, dietary_tags,
+available, in_stock}]`, reading the local inventory cache — so the
+lookup logic exists exactly once. `check_menu` exposes it directly as a
+read for the LLM's conversational use (price/dietary questions).
+`dispatch_delivery` calls the same helper to validate every request
+itself, rather than trusting that `check_menu` was called first — the
+model has no guaranteed reason to check an unambiguous item like
+"towel" before dispatching it, so the "unavailable items are reported,
+not silently sent" guarantee has to hold at the point of dispatch, not
+just when the model happens to check first.
+
 ### `check_menu(items?: list[str])` — new
 Reads the orchestrator's local inventory cache (see below), returns
 matching entries (or the whole catalog if `items` omitted):
@@ -148,8 +160,9 @@ available, the same way it already asks "which room are you in?" without
 a dedicated tool for that.
 
 ### `dispatch_delivery(room, items[], priority)` — changed behavior
-1. Look up each requested item name (case-insensitive) in the local
-   inventory cache.
+1. Call the shared `_lookup_items` helper (case-insensitive names)
+   itself — regardless of whether `check_menu` was already called this
+   turn.
 2. Split into `dispatched_items` (found, `available=true`, and
    `stock_count` is null or `>0`) and `unavailable_items` (everything
    else, with a reason: `not_offered` or `out_of_stock`).
