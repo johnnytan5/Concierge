@@ -30,6 +30,7 @@ import uuid
 _SIM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sim"))
 sys.path.insert(0, _SIM_DIR)
 from concierge_sim import DeliveryBotSimulator  # noqa: E402
+from task_engine import supabase_sync
 
 MODEL_PATH = os.path.join(_SIM_DIR, "delivery_bot_v2.xml")
 
@@ -161,8 +162,9 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
 
 
 def run(cmd_queue, state):
-    """Entry point for Process 2. Task 6b adds Supabase polling/mirror
-    calls inside this loop; the phase-transition logic above is
+    """Entry point for Process 2. Polls Supabase for human-confirmation
+    events (~once per second, not every tick) and mirrors robots/
+    deliveries state back; the phase-transition logic above is
     unchanged by that."""
     sims = {rid: DeliveryBotSimulator(MODEL_PATH) for rid in ROBOT_IDS}
     for sim in sims.values():
@@ -174,6 +176,7 @@ def run(cmd_queue, state):
     state["robots"] = {rid: dict(r) for rid, r in robots.items()}
 
     tick = 1.0 / TICK_HZ
+    tick_count = 0
     try:
         while True:
             while True:
@@ -183,7 +186,14 @@ def run(cmd_queue, state):
                     break
 
             now = time.time()
-            confirmed = {rid: False for rid in ROBOT_IDS}  # Task 6b fills this from Supabase
+            tick_count += 1
+
+            confirmed = {rid: False for rid in ROBOT_IDS}
+            sync_this_tick = (tick_count % 5 == 0)  # ~once per second at 5Hz, not every tick
+            if sync_this_tick:
+                for cmd_row in supabase_sync.poll_pending_commands(ROBOT_IDS):
+                    confirmed[cmd_row["robot_id"]] = True
+                    supabase_sync.mark_command_done(cmd_row["id"])
 
             idle_ids = [rid for rid, r in robots.items() if r["phase"] == "IDLE"]
             for tid, t in tasks.items():
@@ -208,6 +218,14 @@ def run(cmd_queue, state):
 
             state["tasks"] = dict(tasks)
             state["robots"] = {rid: dict(r) for rid, r in robots.items()}
+
+            if sync_this_tick:
+                for rid, r in robots.items():
+                    supabase_sync.mirror_robot(rid, r["phase"], r["current_task"],
+                                                 r["pose_frac"], r["battery"])
+                for t in tasks.values():
+                    supabase_sync.mirror_delivery(t)
+
             time.sleep(tick)
     finally:
         for sim in sims.values():
