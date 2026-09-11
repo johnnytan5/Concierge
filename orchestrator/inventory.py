@@ -108,6 +108,15 @@ def insert_escalation(reason: str, room: str | None):
     asyncio.get_running_loop().run_in_executor(None, _do)
 
 
+def insert_tool_call_event(tool_name: str, arguments: dict, result_summary: str):
+    def _do():
+        _get_client().table("tool_call_events").insert({
+            "tool_name": tool_name, "arguments": arguments,
+            "result_summary": result_summary[:500],
+        }).execute()
+    asyncio.get_running_loop().run_in_executor(None, _do)
+
+
 if __name__ == "__main__":
     # ponytail: real Supabase, not a mock — this is the actual
     # integration point. Requires Task 1's schema + real .env values.

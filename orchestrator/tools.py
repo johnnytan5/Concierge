@@ -1,11 +1,13 @@
-"""Process 1 tool schema + handlers — six client-side function tools per
-CLAUDE.md's tool table. Every handler either puts one command on
-task_engine's cmd_queue or reads its shared `state` dict, and returns
-immediately — never waits on the robot (CLAUDE.md constraint 2).
+"""Process 1 tool schema + handlers — eight client-side function tools per
+CLAUDE.md's tool table (plus check_menu and escalate_to_frontdesk). Every
+handler either puts one command on task_engine's cmd_queue or reads its
+shared `state` dict, and returns immediately — never waits on the robot
+(CLAUDE.md constraint 2).
 """
 import time
 import uuid
 
+from orchestrator import inventory
 from task_engine.engine import BASE_ETA_SECONDS
 
 # Flat schema per AssemblyAI Voice Agent API (session.tools) — NOT OpenAI's
@@ -13,8 +15,19 @@ from task_engine.engine import BASE_ETA_SECONDS
 SESSION_TOOLS = [
     {
         "type": "function",
+        "name": "check_menu",
+        "description": "Look up price, dietary tags, and availability for one or more items (or the whole menu if none given).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
         "name": "dispatch_delivery",
-        "description": "Send the delivery robot to a room with the given items.",
+        "description": "Send a delivery robot to a room with the given items. Unavailable items are reported back, not sent.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -67,8 +80,8 @@ SESSION_TOOLS = [
     },
     {
         "type": "function",
-        "name": "get_robot_state",
-        "description": "Current robot pose, payload, battery, and active task.",
+        "name": "get_fleet_state",
+        "description": "Current status of every robot: phase, room, active task, battery.",
         "parameters": {"type": "object", "properties": {}},
     },
     {
@@ -79,6 +92,18 @@ SESSION_TOOLS = [
             "type": "object",
             "properties": {"room": {"type": "string"}},
             "required": ["room"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "escalate_to_frontdesk",
+        "description": "Route a non-delivery request (late checkout, lost card, billing, etc.) to a human front-desk staff member.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "What the guest needs, in plain language."},
+            },
+            "required": ["reason"],
         },
     },
 ]
@@ -92,11 +117,34 @@ class ToolHandlers:
         self._q = cmd_queue
         self._state = state
 
+    def check_menu(self, items=None):
+        if items:
+            return inventory.lookup_items(items)
+        return inventory.all_items()
+
     def dispatch_delivery(self, room, items, priority="normal"):
+        looked_up = inventory.lookup_items(items)
+        dispatched = [i for i in looked_up if i["available"] and i["in_stock"]]
+        unavailable = [
+            {"name": i["name"], "reason": "not_offered" if i["category"] is None
+                                            or not i["available"] else "out_of_stock"}
+            for i in looked_up if not (i["available"] and i["in_stock"])
+        ]
+
+        if not dispatched:
+            return {"task_id": None, "dispatched_items": [], "unavailable_items": unavailable}
+
         task_id = uuid.uuid4().hex[:8]
+        item_names = [i["name"] for i in dispatched]
         self._q.put({"cmd": "dispatch", "task_id": task_id, "room": room,
-                     "items": items, "priority": priority})
-        return {"task_id": task_id, "eta_seconds": BASE_ETA_SECONDS}
+                     "items": item_names, "priority": priority})
+
+        inventory.decrement_stock(item_names)
+        inventory.insert_delivery({"task_id": task_id, "room": room, "items": item_names,
+                                    "phase": "QUEUED", "priority": priority})
+
+        return {"task_id": task_id, "eta_seconds": BASE_ETA_SECONDS,
+                "dispatched_items": dispatched, "unavailable_items": unavailable}
 
     def check_delivery_status(self, task_id=None, room=None):
         tasks = self._state.get("tasks", {})
@@ -123,14 +171,13 @@ class ToolHandlers:
         self._q.put({"cmd": "recall", "task_id": task_id, "reason": reason})
         return {"ack": True}
 
-    def get_robot_state(self):
-        robot = self._state.get("robot", {})
-        return {
-            "pose": {"frac": robot.get("pose_frac", 0.0)},
-            "payload": robot.get("payload", []),
-            "battery": robot.get("battery", 100.0),
-            "current_task": robot.get("current_task"),
-        }
+    def get_fleet_state(self):
+        robots = self._state.get("robots", {})
+        return {"robots": [
+            {"robot_id": rid, "phase": r.get("phase"), "current_task_id": r.get("current_task"),
+             "battery": r.get("battery", 100.0), "pose_frac": r.get("pose_frac", 0.0)}
+            for rid, r in robots.items()
+        ]}
 
     def announce_arrival(self, room):
         tasks = self._state.get("tasks", {})
@@ -139,12 +186,19 @@ class ToolHandlers:
             self._q.put({"cmd": "announce", "task_id": t["task_id"]})
         return {"ack": True}
 
+    def escalate_to_frontdesk(self, reason):
+        inventory.insert_escalation(reason, None)
+        return {"ack": True}
+
     def dispatch(self, name, arguments):
         """Look up and call a handler by the tool name the agent sent in tool.call."""
         fn = getattr(self, name, None)
         if fn is None:
-            return {"error": f"unknown_tool:{name}"}
-        return fn(**arguments)
+            result = {"error": f"unknown_tool:{name}"}
+        else:
+            result = fn(**arguments)
+        inventory.insert_tool_call_event(name, arguments, str(result))
+        return result
 
 
 if __name__ == "__main__":
@@ -158,14 +212,47 @@ if __name__ == "__main__":
 
     def demo():
         q = _FakeQueue()
-        state = {"tasks": {}, "robot": {"pose_frac": 0.0}}
+        state = {"tasks": {}, "robots": {"robot_1": {"phase": "IDLE", "pose_frac": 0.0,
+                                                        "current_task": None, "battery": 100.0}}}
         h = ToolHandlers(q, state)
 
-        result = h.dispatch("dispatch_delivery", {"room": "1204", "items": ["towel"]})
-        assert "task_id" in result and result["eta_seconds"] == BASE_ETA_SECONDS
-        assert q.items[-1]["cmd"] == "dispatch"
+        # fake inventory cache directly, no live Supabase needed for this check
+        inventory._cache = {
+            "towel": {"name": "towel", "category": "amenity", "price": None,
+                       "dietary_tags": [], "available": True, "stock_count": None},
+            "nasi lemak": {"name": "nasi lemak", "category": "food", "price": 8.0,
+                             "dietary_tags": ["halal"], "available": True, "stock_count": 3},
+            "toothbrush": {"name": "toothbrush", "category": "amenity", "price": None,
+                             "dietary_tags": [], "available": False, "stock_count": 0},
+        }
 
-        # simulate task_engine having created the task
+        # insert_tool_call_event uses asyncio.get_running_loop() internally
+        # (fire-and-forget, per the spec) -- there's no running loop in this
+        # plain synchronous self-check, so stub it out rather than adding an
+        # asyncio.run() wrapper just for this. Same offline-check philosophy
+        # as the fake inventory cache above: no live Supabase needed here.
+        logged_events = []
+        inventory.insert_tool_call_event = lambda name, args, summary: logged_events.append(name)
+        inventory.decrement_stock = lambda item_names: None
+        inventory.insert_delivery = lambda task: None
+        inventory.insert_escalation = lambda reason, room: None
+
+        menu = h.dispatch("check_menu", {"items": ["nasi lemak"]})
+        assert menu[0]["price"] == 8.0 and "halal" in menu[0]["dietary_tags"]
+
+        result = h.dispatch("dispatch_delivery",
+                             {"room": "1204", "items": ["towel", "toothbrush"]})
+        assert result["task_id"] is not None
+        assert [i["name"] for i in result["dispatched_items"]] == ["towel"]
+        assert result["unavailable_items"][0]["name"] == "toothbrush"
+        assert q.items[-1]["cmd"] == "dispatch"
+        assert q.items[-1]["items"] == ["towel"]  # only the valid item reached task_engine
+
+        all_unavailable = h.dispatch("dispatch_delivery",
+                                       {"room": "1204", "items": ["toothbrush"]})
+        assert all_unavailable["task_id"] is None
+        assert len(q.items) == 1, "no dispatch command should be enqueued for zero valid items"
+
         tid = result["task_id"]
         state["tasks"][tid] = {"task_id": tid, "room": "1204", "phase": "EN_ROUTE",
                                 "dispatched_at": time.time(), "eta_seconds": 90.0}
@@ -177,8 +264,18 @@ if __name__ == "__main__":
         assert ack == {"ack": True}
         assert q.items[-1]["cmd"] == "recall"
 
+        fleet = h.dispatch("get_fleet_state", {})
+        assert fleet["robots"][0]["robot_id"] == "robot_1"
+
+        esc = h.dispatch("escalate_to_frontdesk", {"reason": "late checkout"})
+        assert esc == {"ack": True}
+
         unknown = h.dispatch("not_a_real_tool", {})
         assert "error" in unknown
+
+        assert logged_events == ["check_menu", "dispatch_delivery", "dispatch_delivery",
+                                   "check_delivery_status", "recall_robot", "get_fleet_state",
+                                   "escalate_to_frontdesk", "not_a_real_tool"], logged_events
 
         print("tools self-check OK")
 
