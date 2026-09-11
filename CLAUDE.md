@@ -80,12 +80,14 @@ that override convenience every time.
 
 | Tool | Args | Returns | Blocking? |
 |---|---|---|---|
-| `dispatch_delivery` | `room, items[], priority` | `task_id, eta_seconds` | No |
+| `check_menu` | `items[]?` | list of `{name, category, price, dietary_tags, available, in_stock}` | No |
+| `dispatch_delivery` | `room, items[], priority` | `task_id, eta_seconds, dispatched_items[], unavailable_items[]` | No |
 | `check_delivery_status` | `task_id \| room` | `phase, position, eta` | No |
 | `amend_delivery` | `task_id, add[], remove[], new_room` | updated task | No |
 | `recall_robot` | `task_id, reason` | `ack` | No |
-| `get_robot_state` | — | `pose, payload, battery, current_task` | No |
+| `get_fleet_state` | — | `robots: [{robot_id, phase, current_task_id, battery, pose_frac}, ...]` | No |
 | `announce_arrival` | `room` | `ack` | No |
+| `escalate_to_frontdesk` | `reason` | `ack` | No |
 
 ## Current phase
 

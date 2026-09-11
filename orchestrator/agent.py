@@ -66,6 +66,7 @@ import sounddevice as sd
 import websockets
 from dotenv import load_dotenv
 
+from orchestrator import inventory
 from orchestrator.tools import SESSION_TOOLS, ToolHandlers
 from task_engine.engine import run as run_task_engine
 
@@ -90,11 +91,16 @@ USE_BYO_LLM = True  # via OpenRouter (OPENROUTER_API_KEY in .env), not AssemblyA
 SYSTEM_PROMPT = (
     "You are the front-desk voice assistant for a hotel. Guests and staff "
     "ask you to send items to rooms, check on deliveries already under way, "
-    "or change/cancel one mid-flight. Use dispatch_delivery, "
-    "check_delivery_status, amend_delivery, recall_robot, get_robot_state "
-    "and announce_arrival for anything involving the delivery robot — "
-    "never claim a delivery is done, in progress, or arrived unless a tool "
-    "told you so first."
+    "or change/cancel one mid-flight. Use check_menu, dispatch_delivery, "
+    "check_delivery_status, amend_delivery, recall_robot, get_fleet_state "
+    "and announce_arrival for anything involving the delivery robots or "
+    "what the hotel offers — never claim a delivery is done, in progress, "
+    "or arrived unless a tool told you so first. "
+    "Use check_menu before quoting a price or confirming a food order; if "
+    "an item carries dietary tags, ask the guest about the relevant "
+    "preference before confirming. "
+    "Anything that isn't a delivery or inventory request — late checkout, "
+    "lost card, billing, complaints — call escalate_to_frontdesk."
 )
 
 # Room numbers / dish names pulled straight from PLAN.md's scenarios (S1-S3) —
@@ -299,26 +305,48 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict):
             await ws.send(json.dumps({"type": "Terminate"}))
 
 
+async def start_inventory():
+    """Prime the inventory cache once, then keep it refreshing in the
+    background. MUST run before the first turn can call a tool: the cache
+    starts empty, so without this every item looks "not offered" and
+    dispatch_delivery never enqueues anything — the headline feature,
+    inert. (No task in the inventory/fleet plan owned this file, so nothing
+    ever called inventory's own refresh entry points; only a throwaway test
+    script did, by hand, which is why the live e2e check passed anyway.)
+
+    The blocking refresh goes through run_in_executor, never straight onto
+    the event loop (CLAUDE.md constraint 2). Returns the refresh task so
+    the caller can cancel it — and so it isn't garbage-collected mid-run."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, inventory.refresh_cache_sync)
+    print(f"inventory cache primed: {len(inventory.all_items())} items")
+    return asyncio.create_task(inventory.start_refresh_loop())
+
+
 async def run_agent(handlers: ToolHandlers, api_key: str):
     """Connects, self-healing once if the stored agent has vanished (see
     ensure_agent's docstring / module docstring's TTL note)."""
     headers = {"Authorization": f"Bearer {api_key}"}
+    refresh_task = await start_inventory()  # before the session opens — see start_inventory
     agent_id = ensure_agent(api_key)
 
-    for attempt in (1, 2):
-        async with websockets.connect(WS_URL, additional_headers=headers) as ws:
-            await ws.send(json.dumps({"type": "session.update", "session": {"agent_id": agent_id}}))
-            first = json.loads(await ws.recv())
+    try:
+        for attempt in (1, 2):
+            async with websockets.connect(WS_URL, additional_headers=headers) as ws:
+                await ws.send(json.dumps({"type": "session.update", "session": {"agent_id": agent_id}}))
+                first = json.loads(await ws.recv())
 
-            if first.get("type") in ("error", "session.error"):
-                if first.get("code") == "agent_not_found" and attempt == 1:
-                    print("stored agent vanished before connect — creating a fresh one and retrying once")
-                    agent_id = ensure_agent(api_key, force_new=True)
-                    continue
-                raise RuntimeError(f"session error: {first}")
+                if first.get("type") in ("error", "session.error"):
+                    if first.get("code") == "agent_not_found" and attempt == 1:
+                        print("stored agent vanished before connect — creating a fresh one and retrying once")
+                        agent_id = ensure_agent(api_key, force_new=True)
+                        continue
+                    raise RuntimeError(f"session error: {first}")
 
-            await _run_session(ws, handlers, first)
-            return
+                await _run_session(ws, handlers, first)
+                return
+    finally:
+        refresh_task.cancel()
 
 
 def main():

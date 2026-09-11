@@ -420,6 +420,9 @@ Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
 **Files:**
 - Modify: `orchestrator/tools.py` (whole file — this task rewrites most
   of it against the current version read at plan-writing time)
+- Modify: `orchestrator/inventory.py` (add one function — see Step 3a
+  below; this was added to the spec after Task 3 was already dispatched,
+  so Task 3's version of this file doesn't have it yet)
 
 **Interfaces:**
 - Consumes: `orchestrator.inventory.lookup_items`,
@@ -432,7 +435,13 @@ Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
   shape), `escalate_to_frontdesk`, `get_fleet_state` (replaces
   `get_robot_state`) — all consumed by `orchestrator/agent.py`
   unchanged (it just calls `handlers.dispatch(name, arguments)`, no
-  changes needed there).
+  changes needed there). Also produces
+  `orchestrator.inventory.insert_tool_call_event(tool_name, arguments,
+  result_summary)`, called from `ToolHandlers.dispatch()` so every tool
+  call is logged — Sub-project B's dashboard needs this (see the spec's
+  "Added after Sub-project B's design surfaced a gap" note); without it,
+  read-only calls like `check_menu` would be invisible to any
+  visualization since they have no other side effect to observe.
 
 - [ ] **Step 1: Replace the `SESSION_TOOLS` list**
 
@@ -598,6 +607,50 @@ Remove the old `get_robot_state` method entirely (replaced by
 multi-robot shape Task 6 produces, not the old `self._state["robot"]`
 singular key).
 
+- [ ] **Step 3a: Add `insert_tool_call_event` to `orchestrator/inventory.py`**
+
+Append this function to `orchestrator/inventory.py` (Task 3 already
+created this file — this adds one more function to it, mirroring
+`insert_escalation`'s exact shape):
+
+```python
+def insert_tool_call_event(tool_name: str, arguments: dict, result_summary: str):
+    def _do():
+        _get_client().table("tool_call_events").insert({
+            "tool_name": tool_name, "arguments": arguments,
+            "result_summary": result_summary[:500],
+        }).execute()
+    asyncio.get_running_loop().run_in_executor(None, _do)
+```
+
+- [ ] **Step 3b: Wire it into `ToolHandlers.dispatch()`**
+
+Find the `dispatch` method on `ToolHandlers` (the single choke point
+every tool call already passes through):
+
+```python
+    def dispatch(self, name, arguments):
+        """Look up and call a handler by the tool name the agent sent in tool.call."""
+        fn = getattr(self, name, None)
+        if fn is None:
+            return {"error": f"unknown_tool:{name}"}
+        return fn(**arguments)
+```
+
+Replace it with:
+
+```python
+    def dispatch(self, name, arguments):
+        """Look up and call a handler by the tool name the agent sent in tool.call."""
+        fn = getattr(self, name, None)
+        if fn is None:
+            result = {"error": f"unknown_tool:{name}"}
+        else:
+            result = fn(**arguments)
+        inventory.insert_tool_call_event(name, arguments, str(result))
+        return result
+```
+
 - [ ] **Step 4: Update the self-check**
 
 The existing `if __name__ == "__main__":` block's `demo()` references
@@ -621,6 +674,21 @@ function:
             "toothbrush": {"name": "toothbrush", "category": "amenity", "price": None,
                              "dietary_tags": [], "available": False, "stock_count": 0},
         }
+
+        # Every fire-and-forget write in inventory.py (decrement_stock,
+        # insert_delivery, insert_tool_call_event) uses
+        # asyncio.get_running_loop() internally -- there's no running loop
+        # in this plain synchronous self-check, so ALL THREE must be
+        # stubbed, not just the one this task adds. dispatch_delivery's
+        # success path calls decrement_stock + insert_delivery too. Same
+        # offline-check philosophy as the fake inventory cache above: no
+        # live Supabase needed here.
+        logged_events = []
+        inventory.insert_tool_call_event = lambda name, args, summary: logged_events.append(name)
+        inventory.decrement_stock = lambda item_names: None
+        inventory.insert_delivery = lambda task: None
+        inventory.insert_escalation = lambda reason, room: None  # escalate_to_frontdesk hits
+                                                                    # this same asyncio issue too
 
         menu = h.dispatch("check_menu", {"items": ["nasi lemak"]})
         assert menu[0]["price"] == 8.0 and "halal" in menu[0]["dietary_tags"]
@@ -658,6 +726,10 @@ function:
         unknown = h.dispatch("not_a_real_tool", {})
         assert "error" in unknown
 
+        assert logged_events == ["check_menu", "dispatch_delivery", "dispatch_delivery",
+                                   "check_delivery_status", "recall_robot", "get_fleet_state",
+                                   "escalate_to_frontdesk", "not_a_real_tool"], logged_events
+
         print("tools self-check OK")
 
     demo()
@@ -673,7 +745,7 @@ no live Supabase needed for this check.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add orchestrator/tools.py
+git add orchestrator/tools.py orchestrator/inventory.py
 git commit -m "orchestrator/tools.py: check_menu, dispatch validation, escalation, fleet state
 
 dispatch_delivery now validates against the inventory cache and only
@@ -1139,10 +1211,24 @@ Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
 
 - [ ] **Step 1: Add the import and polling/mirroring calls to `run()`**
 
-Add near the top imports:
+Add near the top imports, right after the existing `_SIM_DIR`/`sys.path`
+lines — same pattern already used one import above it for
+`concierge_sim` (a flat sibling-module import via an explicit
+`sys.path` insert), not a package-qualified import. `engine.py`'s
+established self-check convention throughout this project is running it
+as a bare script (`python task_engine/engine.py`), which puts
+`task_engine/`'s own directory on `sys.path[0]`, not the repo root — so
+`from task_engine import supabase_sync` only resolves under `-m`
+invocation and breaks the bare-script convention. `supabase_sync.py`
+lives in the same directory as `engine.py` (both are `task_engine/`
+files), so this is exactly the sibling-import case `_SIM_DIR` already
+solves one line above:
 ```python
-from task_engine import supabase_sync
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import supabase_sync
 ```
+(Call sites elsewhere in this task stay `supabase_sync.poll_pending_commands(...)`
+etc. unchanged — only the import statement changes, not how it's used.)
 
 Replace the `run()` function's body with this version (only the parts
 inside the `while True:` loop change — add a `tick_count` counter, real

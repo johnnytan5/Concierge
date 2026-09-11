@@ -9,6 +9,7 @@ python-dotenv
 sounddevice
 cffi    # sounddevice's hard dependency — pinned explicitly, not left implicit
 numpy
+supabase
 
 # Task engine + sim (Processes 2 & 3)
 mujoco

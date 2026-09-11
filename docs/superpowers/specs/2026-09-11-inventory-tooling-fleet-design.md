@@ -112,16 +112,37 @@ create table frontdesk_escalations (
   room text,
   created_at timestamptz not null default now()
 );
+
+create table tool_call_events (
+  id uuid primary key default gen_random_uuid(),
+  tool_name text not null,
+  arguments jsonb not null,
+  result_summary text,
+  created_at timestamptz not null default now()
+);
 ```
 
+**Added after Sub-project B's design surfaced a gap:** the tables above
+only capture tool calls that have a *side effect* (a delivery row, a
+phase change, an escalation). A read-only call like `check_menu` writes
+nothing anywhere — a guest asking "what's on the menu?" would be
+completely invisible to any dashboard. `tool_call_events` logs every
+tool call, unconditionally, regardless of whether it also writes
+elsewhere — this is what makes a real "tool call fired" visualization
+possible at all, not just an inference from other tables changing.
+Logged from the single choke point every tool call already passes
+through: `ToolHandlers.dispatch()` in `orchestrator/tools.py` (see the
+Tool changes section below).
+
 RLS (per the Supabase security checklist — enable on every exposed table):
-- `inventory_items`, `robots`, `deliveries`, `frontdesk_escalations`: RLS
-  enabled, a `select` policy for `anon`/`authenticated` (public read — no
-  sensitive data, needed so Sub-project B's dashboard/LED screens can
-  read live via the anon key). No `insert`/`update`/`delete` policy for
-  `anon`/`authenticated` — writes only happen from trusted backend
-  processes (orchestrator, task_engine) using the **service role** key,
-  which bypasses RLS by design.
+- `inventory_items`, `robots`, `deliveries`, `frontdesk_escalations`,
+  `tool_call_events`: RLS enabled, a `select` policy for
+  `anon`/`authenticated` (public read — no sensitive data, needed so
+  Sub-project B's dashboard/LED screens can read live via the anon key).
+  No `insert`/`update`/`delete` policy for `anon`/`authenticated` —
+  writes only happen from trusted backend processes (orchestrator,
+  task_engine) using the **service role** key, which bypasses RLS by
+  design.
 - `robot_commands`: RLS enabled, no `anon`/`authenticated` policies at
   all for now — Sub-project B's FastAPI backend (a trusted server, not
   the browser) writes here using the service role key too. If B later
@@ -209,6 +230,17 @@ sync with `orchestrator/tools.py` per its own header comment.
 Unchanged in shape; `amend_delivery`'s item-add path should reuse the
 same inventory validation as `dispatch_delivery` (reject/report
 unavailable additions the same way), everything else as today.
+
+### `ToolHandlers.dispatch()` — logs every call
+This is the one method every tool call already passes through
+(`fn = getattr(self, name); return fn(**arguments)`). Add a
+fire-and-forget insert into `tool_call_events` (`tool_name`,
+`arguments`, and a short `result_summary` — e.g. the result dict's
+`str()`, truncated) right there, unconditionally, before returning. This
+is the only place this needs to happen — no per-tool-method changes, and
+it can't be missed by a tool added later. Same fire-and-forget rule as
+every other write in this spec: never awaited before `dispatch()`
+returns.
 
 ## Orchestrator-side inventory cache
 
