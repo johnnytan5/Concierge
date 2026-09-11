@@ -153,16 +153,18 @@ Three processes. The separation is not optional — a blocking `mj_step` inside 
 
 ### Tool schema
 
-Six client-side function tools, declared inline in `session.tools`. Client-side rather than HTTP tools because the sim is in-process state, which is exactly the case the docs say client-side tools are for.
+Eight client-side function tools, declared inline in `session.tools`. Client-side rather than HTTP tools because the sim is in-process state, which is exactly the case the docs say client-side tools are for.
 
 | Tool | Returns | Blocking? |
 |---|---|---|
-| `dispatch_delivery(room, items[], priority)` | `task_id`, `eta_seconds` | No — returns instantly |
+| `check_menu(items[]?)` | `{name, category, price, dietary_tags, available, in_stock}` per item | No |
+| `dispatch_delivery(room, items[], priority)` | `task_id`, `eta_seconds`, `dispatched_items[]`, `unavailable_items[]` | No — returns instantly |
 | `check_delivery_status(task_id \| room)` | phase, position, eta | No |
 | `amend_delivery(task_id, add[], remove[], new_room)` | updated task | No |
-| `recall_robot(task_id, reason)` | ack | No |
-| `get_robot_state()` | pose, payload, battery, current task | No |
+| `recall_robot(task_id, reason)` | ack (`false` + reason if the task is already finished or unknown) | No |
+| `get_fleet_state()` | `robots: [{robot_id, phase, room, current_task_id, battery, pose_frac}, ...]` | No |
 | `announce_arrival(room)` | ack | No |
+| `escalate_to_frontdesk(reason)` | ack | No |
 
 **The non-blocking rule is the single most important engineering constraint in this project.** A delivery takes 90 seconds. If you hold the tool call open for 90 seconds, the conversation dies. Every handler mutates the task queue and returns within milliseconds; arrival surfaces later as a separate turn or an outbound call.
 
@@ -194,7 +196,7 @@ The `turn-taking` sample agent exposes silence thresholds and interruption sensi
 |---|---|---|
 | 1–3 | Both halves alive *independently*: orchestrator talking to the Voice Agent API (local mic/speaker); cabinet-bot driving in the viewer. Run RQ1. | If code-switching WER is unusable, pivot the language angle now |
 | 4–7 | **Vertical slice**: one spoken sentence → `dispatch_delivery` → robot visibly moves | **If this is not working on Day 7, cut manipulation permanently** |
-| 8–14 | Hotel scene, waypoint nav, task queue, all six tools, S1 + S2 end to end | |
+| 8–14 | Hotel scene, waypoint nav, task queue, all eight tools, S1 + S2 end to end | |
 | 15–20 | `keyterms` + turn-taking tuning against a live key. RQ2, RQ3, RQ4. S3 recorded. | |
 | 21–25 | S4 and S5. Failure handling. Rehearse the full run three times. | |
 | 26–28 | Demo video, writeup with the WER charts, submission | Submit by Day 28, not Day 30 |

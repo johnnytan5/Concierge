@@ -43,8 +43,11 @@ Constraints that must never be violated live in `CLAUDE.md`.
   "items": [...]}`.
 - **Task engine → Orchestrator:** shared state (dict behind a `Manager`, or
   a second Queue for events) so `check_delivery_status` and
-  `get_robot_state` can read current position/phase without blocking on
-  the task engine's own loop.
+  `get_fleet_state` can read current position/phase without blocking on
+  the task engine's own loop. Two keys: `state["tasks"]` (task_id → task
+  dict) and `state["robots"]` (robot_id → `{phase, pose_frac, battery,
+  current_task}`) — one entry per robot in the fleet, not a single
+  `state["robot"]`.
 - **Task engine → MuJoCo:** direct Python calls if Process 2 and 3 are
   merged (acceptable — the hard boundary is Process 1 vs. everything else,
   since Process 1 is the one with a live WebSocket to a paid, latency-
