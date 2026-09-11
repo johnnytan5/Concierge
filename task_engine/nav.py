@@ -61,39 +61,74 @@ def _point_at_arc_length(path: list[tuple[float, float]], s: float) -> tuple[flo
     return path[-1]
 
 
+def _closest_arc_length(path: list[tuple[float, float]], x: float, y: float) -> float:
+    """Project the real point (x, y) onto `path`'s polyline; return the
+    arc-length coordinate of the closest point on it. This is what makes
+    `pure_pursuit_step` immune to any mismatch between an assumed tick
+    duration and the sim's real elapsed time -- there is no assumed tick
+    duration, progress comes from where the robot actually is."""
+    best_s = 0.0
+    best_dist = float("inf")
+    cumulative = 0.0
+    for i in range(len(path) - 1):
+        x0, y0 = path[i]
+        x1, y1 = path[i + 1]
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if seg_len > 0:
+            t = ((x - x0) * (x1 - x0) + (y - y0) * (y1 - y0)) / (seg_len ** 2)
+            t = max(0.0, min(1.0, t))
+            px, py = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
+            dist = math.hypot(x - px, y - py)
+            if dist < best_dist:
+                best_dist = dist
+                best_s = cumulative + t * seg_len
+        cumulative += seg_len
+    return best_s
+
+
 def pure_pursuit_step(sim, path: list[tuple[float, float]], progress_m: float,
-                       speed_mps: float, dt: float, lookahead_m: float = 0.15,
+                       speed_mps: float, lookahead_m: float = 0.15,
                        arrival_tolerance_m: float = 0.05,
                        steer_gain: float = 2.0) -> tuple[float, float, bool]:
-    """Advance one step along `path`. Returns (new_progress_m, frac, done)
-    -- `new_progress_m` really is the advanced value (`progress_m +
-    speed_mps * dt`, clamped to the path's total length); the caller
-    stores it directly, no follow-up arithmetic needed on its end.
+    """Advance one step along `path`. Returns (new_progress_m, frac, done).
 
-    `progress_m` is arc-length already covered so far, tracked by the
-    caller (engine.py) across ticks -- this function is otherwise
-    stateless. `dt` is the caller's own tick duration (engine.py passes
-    `1.0 / TICK_HZ`) -- kept as an explicit parameter rather than a
-    constant here so nav.py has zero dependency on engine.py's tick rate;
-    a self-check or any other caller can drive this at whatever rate it
-    wants by passing its own matching `dt`.
+    `new_progress_m` is derived from the robot's REAL measured position
+    this call (via `_closest_arc_length`), not dead-reckoned from
+    `speed_mps` and an assumed tick duration -- an earlier version of this
+    function did dead-reckon (`progress_m + speed_mps * dt`), and Task 2's
+    own implementation found a real bug because of it: on a machine where
+    `mj_step`'s realtime pacing runs slower than wall-clock (confirmed
+    ~70-80% here), a fixed nominal `dt` drifts the dead-reckoned estimate
+    ahead of the robot's real position, pulling the lookahead point onto
+    the *next* leg of the path while the robot is still physically inside
+    the previous corridor segment -- which visibly clips a wall at any
+    corner. Deriving progress from real measured position eliminates this
+    bug class outright rather than requiring every caller to supply a
+    carefully-measured `dt` to avoid it, and it's the more standard
+    pure-pursuit technique anyway (project from real position, don't
+    integrate an open-loop estimate). `progress_m` is passed in only so a
+    caller can still track/expose it (e.g. `pose_frac`) between calls --
+    this function does not use the incoming value for anything except as
+    the pre-advance value to return if the path is degenerate.
 
-    Steering uses the CURRENT (pre-advance) position -- look ahead from
-    where the robot actually is this tick, then advance progress for the
-    next call.
+    `speed_mps` still drives the actual motor command (`sim.drive`) --
+    only the *progress-tracking* arithmetic changes, not the driving
+    speed itself.
     """
     status = sim.pull_status()
     x, y = status.base.xy
     yaw = math.radians(status.base.yaw_deg)
 
-    look_x, look_y = _point_at_arc_length(path, progress_m + lookahead_m)
+    measured_s = _closest_arc_length(path, x, y)
+    new_progress_m = max(progress_m, measured_s)  # never regress from a noisy projection
+
+    look_x, look_y = _point_at_arc_length(path, new_progress_m + lookahead_m)
     bearing = math.atan2(look_y - y, look_x - x)
     heading_error = math.atan2(math.sin(bearing - yaw), math.cos(bearing - yaw))
 
     sim.drive(v=speed_mps, omega=steer_gain * heading_error)
 
     total = total_length(path)
-    new_progress_m = min(progress_m + speed_mps * dt, total) if total > 0 else 0.0
     frac = min(new_progress_m / total, 1.0) if total > 0 else 1.0
     final_x, final_y = path[-1]
     done = math.hypot(final_x - x, final_y - y) <= arrival_tolerance_m
@@ -106,50 +141,25 @@ if __name__ == "__main__":
     import time
     import sys
 
+    import mujoco
+
     _SIM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sim"))
     sys.path.insert(0, _SIM_DIR)
     from concierge_sim import DeliveryBotSimulator  # noqa: E402
 
     def demo():
         model = os.path.join(_SIM_DIR, "scene_corridor.xml")
-        loop_sleep_s = 0.05  # this self-check's own wall-clock polling rate --
-                              # nav.py has no dependency on engine.py's real
-                              # TICK_HZ, any rate works here
+        loop_sleep_s = 0.05  # this self-check's own polling rate -- pure_pursuit_step
+                              # has no time-step dependency at all now (progress comes
+                              # from real measured position, not dead-reckoning), so
+                              # this only paces how often the self-check *checks*, not
+                              # anything the navigation math depends on being accurate
 
-        # NOTE on `dt`: measured live (real evidence, not assumed) that this
-        # machine's mj_step realtime-pacing loop lags wall-clock -- Task 1's
-        # report already flagged ~80% on this machine; a direct measurement
-        # here (via status.time deltas across a fixed-tick loop) came out
-        # ~0.69-0.77, same phenomenon. Passing a fixed dt=loop_sleep_s to
-        # pure_pursuit_step (assuming 1:1 wall-clock/sim-time) makes
-        # progress_m's dead-reckoned accumulation (speed_mps * dt per call)
-        # run ahead of the robot's real physical position by a growing
-        # margin every tick. For the straight-leg room this is benign --
-        # `done` is checked against real measured position, not progress_m,
-        # so it only costs extra ticks (confirmed: 0803 arrives at ~248
-        # ticks, not the 200 a naive 1:1-pacing estimate would budget).
-        # For the corner room it is NOT benign: verified with real contact
-        # data (mj `data.contact` naming `wall_n_near_b <-> chassis_collision`
-        # at xy~(2.59, 0.30)) that the drifted progress_m pulls the
-        # lookahead carrot onto the second leg while the robot is still
-        # physically inside the narrow near-arm corridor, so it curves in
-        # too early and clips the same inside corner Task 1's report
-        # diagnosed. Fix verified empirically: measuring the ACTUAL sim-time
-        # elapsed per tick (status.time delta) and passing THAT as `dt`
-        # keeps progress_m in lockstep with the robot's real physical
-        # position (confirmed: progress_m tracks measured x to within
-        # ~0.01m through the whole straight leg) -- with this fix, the
-        # brief's own default lookahead_m=0.15/steer_gain=2.0 clear the
-        # corner with zero wall contacts, so no pure-pursuit retuning was
-        # needed once the actual root cause (dt mismatch, not steering law)
-        # was found.
-
-        def measured_dt(sim, prev_t):
-            cur_t = sim.pull_status().time
-            dt = cur_t - prev_t
-            return (dt if dt > 0 else loop_sleep_s), cur_t
-
-        # Straight-leg room: no corner, sanity check the basic loop.
+        # Straight-leg room: no corner, sanity check the basic loop. Tick
+        # budget (400) has real margin over the measured real-physics
+        # arrival (~248 ticks at loop_sleep_s=0.05) -- this machine's
+        # mj_step runs slower than wall-clock (confirmed ~70-80%, see
+        # Task 1's report), so a naive 1:1-pacing estimate (~200) undercounts.
         sim = DeliveryBotSimulator(model)
         sim.start(headless=True)
         try:
@@ -157,11 +167,8 @@ if __name__ == "__main__":
             progress = 0.0
             speed = 0.1
             fracs = []
-            prev_t = sim.pull_status().time
-            for _ in range(400):  # measured arrival ~248 ticks with real dt;
-                                   # 400 gives ~60% margin over that
-                dt, prev_t = measured_dt(sim, prev_t)
-                progress, frac, done = pure_pursuit_step(sim, path, progress, speed, dt)
+            for _ in range(400):
+                progress, frac, done = pure_pursuit_step(sim, path, progress, speed)
                 fracs.append(frac)
                 if done:
                     break
@@ -172,23 +179,53 @@ if __name__ == "__main__":
         finally:
             sim.stop()
 
-        # Far-arm room: exercises the real 90-degree corner.
+        # Far-arm room: exercises the real 90-degree corner. Tick budget
+        # (1500) has real margin over the measured real-physics arrival
+        # (~1007-1014 ticks) -- this is also the case that would have hit
+        # the dead-reckoning bug the redesigned pure_pursuit_step avoids
+        # (see this task's docstring/ledger note): with progress derived
+        # from real measured position, no wall clipping occurs even
+        # though the underlying step rate is the same slower-than-realtime
+        # physics that exposed the original bug.
         sim = DeliveryBotSimulator(model)
         sim.start(headless=True)
         try:
             path = path_for("1204")
             progress = 0.0
             speed = 0.1
-            prev_t = sim.pull_status().time
-            for _ in range(1500):  # measured arrival ~1007-1012 ticks with
-                                    # real dt; 1500 gives ~40% margin
-                dt, prev_t = measured_dt(sim, prev_t)
-                progress, frac, done = pure_pursuit_step(sim, path, progress, speed, dt)
+            wall_hits = []
+            for _ in range(1500):
+                progress, frac, done = pure_pursuit_step(sim, path, progress, speed)
+                # The actual regression test for the dead-reckoning bug this
+                # task's design fix exists for: check for a real wall contact
+                # every tick, not just narrate it in a report. Direct
+                # data/model access (not pull_status()) is read-only in
+                # intent, but `sim.data.ncon`/`sim.data.contact` are mutated
+                # by the background mj_step thread at every step (MuJoCo
+                # resizes the contact array per step, it is not a fixed-size
+                # buffer) -- reading them here without the sim's own lock is
+                # racy. Confirmed live: an unlocked version of this exact
+                # loop raised IndexError *inside* `sim.data.contact[i]`
+                # itself (not in mj_id2name) on a real run, reproducibly,
+                # because ncon can shrink between reading it and indexing.
+                # Snapshot the (geom1, geom2) pairs atomically under the
+                # sim's lock (the same lock pull_status() uses internally),
+                # then resolve names outside it -- mj_id2name only reads
+                # immutable model data, not step-mutated sim data, so it's
+                # safe unlocked.
+                with sim._lock:
+                    contact_pairs = [(c.geom1, c.geom2) for c in sim.data.contact[:sim.data.ncon]]
+                for g1, g2 in contact_pairs:
+                    name1 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, g1)
+                    name2 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, g2)
+                    if any(n and n.startswith("wall_") for n in (name1, name2)):
+                        wall_hits.append((name1, name2))
                 if done:
                     break
                 time.sleep(loop_sleep_s)
             assert done, "did not arrive at 1204 (through the corner) within the tick budget"
-            print(f"1204 (through the corner): arrived at frac={frac:.2f}")
+            assert not wall_hits, f"clipped a wall during the corner drive: {wall_hits[:3]}"
+            print(f"1204 (through the corner): arrived at frac={frac:.2f}, zero wall contacts")
         finally:
             sim.stop()
 
