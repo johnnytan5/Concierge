@@ -4,6 +4,8 @@ CLAUDE.md constraint 2 (<100ms) applies to tool handlers, not here, so
 plain synchronous Supabase calls are fine in this module.
 """
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 
 from supabase import create_client, Client
@@ -44,10 +46,23 @@ def mirror_robot(robot_id: str, phase: str, current_task_id, pose_frac: float, b
     }).execute()
 
 
-def mirror_delivery(task: dict):
+def _iso(epoch: float | None) -> str | None:
+    """Engine timestamps are epoch floats (time.time()); the deliveries
+    columns are timestamptz. None-safe — a task that hasn't left the desk
+    has no dispatched_at yet."""
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat() if epoch else None
+
+
+def mirror_delivery(task: dict, robot_id: str | None = None):
+    """`robot_id` is the robot that owns (or last owned) this task — the
+    engine knows it, so the deliveries FK should not be left NULL for the
+    dashboards in Sub-project B to guess at. Same for the two timestamps."""
     _get_client().table("deliveries").upsert({
         "task_id": task["task_id"], "room": task["room"], "items": task["items"],
         "phase": task["phase"], "priority": task["priority"],
+        "robot_id": robot_id,
+        "dispatched_at": _iso(task.get("dispatched_at")),
+        "arrived_at": _iso(task.get("arrived_at")),
     }).execute()
 
 
@@ -64,6 +79,29 @@ if __name__ == "__main__":
         pending = poll_pending_commands(["robot_1", "robot_2"])
         assert isinstance(pending, list)  # empty is fine — no commands inserted yet
 
-        print("supabase_sync self-check OK (schema + mirror/poll round trip confirmed live)")
+        # robot_id + both timestamps must actually land (they were dropped
+        # on the floor before the final review's I3)
+        tid = "selfcheck_" + uuid.uuid4().hex[:8]
+        dispatched, arrived = time.time() - 60, time.time()
+        mirror_delivery({"task_id": tid, "room": "1204", "items": ["towel"],
+                          "phase": "ARRIVED", "priority": "normal",
+                          "dispatched_at": dispatched, "arrived_at": arrived}, "robot_1")
+        try:
+            got = (_get_client().table("deliveries").select("*")
+                   .eq("task_id", tid).execute().data[0])
+            assert got["robot_id"] == "robot_1", got
+            assert got["dispatched_at"] and got["arrived_at"], got
+            assert got["dispatched_at"][:4] == _iso(dispatched)[:4], got
+        finally:
+            _get_client().table("deliveries").delete().eq("task_id", tid).execute()
+
+        # a task still at the desk has no timestamps yet — must not blow up
+        mirror_delivery({"task_id": tid, "room": "1204", "items": ["towel"],
+                          "phase": "QUEUED", "priority": "normal",
+                          "dispatched_at": None, "arrived_at": None}, None)
+        _get_client().table("deliveries").delete().eq("task_id", tid).execute()
+
+        print("supabase_sync self-check OK (schema + mirror/poll round trip confirmed live, "
+              "including robot_id + dispatched_at/arrived_at)")
 
     demo()

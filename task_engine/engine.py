@@ -86,19 +86,28 @@ def _handle(cmd, tasks):
         tasks[cmd["task_id"]] = t
 
     elif kind == "recall":
+        # Recall is TOTAL over every phase a robot can physically be
+        # recalled from -- a recall that silently does nothing still gets
+        # acked to the guest by the LLM. ARRIVED matters most: with
+        # DWELL_SECONDS gone, an unattended screen would otherwise wedge a
+        # robot at the door for the rest of the demo with no voice-side
+        # recovery at all.
         t = tasks.get(cmd["task_id"])
         if not t:
             return
-        if t["phase"] == "COLLECTING":
-            # never left the desk -- no motion needed, just cancel
+        phase = t["phase"]
+        if phase in ("QUEUED", "COLLECTING"):
+            # never left the desk (or never even got a robot) -- just cancel
             t["phase"] = "AT_DESK"
-            t["reason"] = cmd.get("reason")
-            tasks[cmd["task_id"]] = t
-        elif t["phase"] == "EN_ROUTE":
+        elif phase == "EN_ROUTE":
             t["phase"] = "RECALLED"
             t["dispatched_at"] = time.time()
-            t["reason"] = cmd.get("reason")
-            tasks[cmd["task_id"]] = t
+        elif phase == "ARRIVED":
+            t["phase"] = "RETURNING"  # _drive_home closes the door on the way
+        else:
+            return  # RETURNING / RECALLED / DONE / AT_DESK -- already coming back or over
+        t["reason"] = cmd.get("reason")
+        tasks[cmd["task_id"]] = t
 
     elif kind == "announce":
         t = tasks.get(cmd["task_id"])
@@ -113,6 +122,7 @@ def _dist_from_origin(sim: DeliveryBotSimulator) -> float:
 
 
 def _drive_home(sim, task, now, terminal_phase, trip_meters, drive_speed, arrival_tolerance_m):
+    sim.close_door()  # idempotent ctrl target; covers a recall straight out of ARRIVED
     sim.drive(v=-drive_speed, omega=0.0)
     remaining = _dist_from_origin(sim)
     frac = min(remaining / trip_meters, 1.0)
@@ -173,6 +183,7 @@ def run(cmd_queue, state):
         sim.start(headless=True)
 
     tasks = {}
+    task_robot = {}  # task_id -> robot_id, kept after the task ends (see I3)
     robots = {rid: _new_robot() for rid in ROBOT_IDS}
     state["tasks"] = {}
     state["robots"] = {rid: dict(r) for rid, r in robots.items()}
@@ -193,9 +204,17 @@ def run(cmd_queue, state):
             confirmed = {rid: False for rid in ROBOT_IDS}
             sync_this_tick = (tick_count % 5 == 0)  # ~once per second at 5Hz, not every tick
             if sync_this_tick:
-                for cmd_row in supabase_sync.poll_pending_commands(ROBOT_IDS):
-                    confirmed[cmd_row["robot_id"]] = True
-                    supabase_sync.mark_command_done(cmd_row["id"])
+                # A DNS blip or a 5xx must not take the whole process down:
+                # this is a daemon proc nobody checks is_alive() on, so an
+                # uncaught exception here leaves the voice agent happily
+                # acking dispatches against a state dict frozen forever.
+                # Keep driving; the robot matters more than the mirror.
+                try:
+                    for cmd_row in supabase_sync.poll_pending_commands(ROBOT_IDS):
+                        confirmed[cmd_row["robot_id"]] = True
+                        supabase_sync.mark_command_done(cmd_row["id"])
+                except Exception as e:
+                    print(f"[task_engine] supabase poll failed, continuing: {e!r}")
 
             idle_ids = [rid for rid, r in robots.items() if r["phase"] == "IDLE"]
             for tid, t in tasks.items():
@@ -205,6 +224,10 @@ def run(cmd_queue, state):
                     tasks[tid] = t
                     robots[rid]["current_task"] = tid
                     robots[rid]["phase"] = "COLLECTING"
+                    # remembered past completion: robots[rid]["current_task"]
+                    # is cleared when the task ends, but deliveries.robot_id
+                    # should still say who ran it
+                    task_robot[tid] = rid
 
             for rid, r in robots.items():
                 tid = r["current_task"]
@@ -222,11 +245,14 @@ def run(cmd_queue, state):
             state["robots"] = {rid: dict(r) for rid, r in robots.items()}
 
             if sync_this_tick:
-                for rid, r in robots.items():
-                    supabase_sync.mirror_robot(rid, r["phase"], r["current_task"],
-                                                 r["pose_frac"], r["battery"])
-                for t in tasks.values():
-                    supabase_sync.mirror_delivery(t)
+                try:
+                    for rid, r in robots.items():
+                        supabase_sync.mirror_robot(rid, r["phase"], r["current_task"],
+                                                     r["pose_frac"], r["battery"])
+                    for t in tasks.values():
+                        supabase_sync.mirror_delivery(t, task_robot.get(t["task_id"]))
+                except Exception as e:
+                    print(f"[task_engine] supabase mirror failed, continuing: {e!r}")
 
             time.sleep(tick)
     finally:
@@ -294,8 +320,33 @@ if __name__ == "__main__":
             _handle({"cmd": "recall", "task_id": "t3", "reason": "guest changed mind"}, tasks)
             assert tasks["t3"]["phase"] == "AT_DESK", tasks["t3"]
 
+            # recall while still QUEUED (no robot ever assigned) -> cancelled
+            _handle({"cmd": "dispatch", "task_id": "t4", "room": "1501", "items": ["towel"]}, tasks)
+            _handle({"cmd": "recall", "task_id": "t4", "reason": "ordered by mistake"}, tasks)
+            assert tasks["t4"]["phase"] == "AT_DESK", tasks["t4"]
+            assert tasks["t4"]["reason"] == "ordered by mistake"
+
+            # recall of an already-finished task is a no-op, not a phase flip
+            _handle({"cmd": "recall", "task_id": "t1", "reason": "too late"}, tasks)
+            assert tasks["t1"]["phase"] == "DONE", tasks["t1"]
+
+            # recall while ARRIVED (nobody came to the door) -> drives home
+            assert tasks["t2"]["phase"] == "ARRIVED"
+            _handle({"cmd": "recall", "task_id": "t2", "reason": "guest not answering"}, tasks)
+            assert tasks["t2"]["phase"] == "RETURNING", tasks["t2"]
+            for _ in range(200):
+                tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
+                                            trip_meters=trip_m, drive_speed=speed, arrival_tolerance_m=tol_m)
+                if tasks["t2"]["phase"] == "DONE":
+                    break
+                time.sleep(0.05)
+            assert tasks["t2"]["phase"] == "DONE", tasks["t2"]
+            door = sims["robot_2"].pull_status().door
+            print(f"robot_2 door after recall-from-ARRIVED: {door}")
+
             print("engine self-check OK (two concurrent robots: dispatch, collect, "
-                  "arrive, collect-confirm, return, and collecting-phase recall)")
+                  "arrive, collect-confirm, return, and recall from QUEUED / "
+                  "COLLECTING / ARRIVED)")
         finally:
             for sim in sims.values():
                 sim.stop()
