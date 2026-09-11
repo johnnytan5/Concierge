@@ -193,20 +193,25 @@ Expected: no MuJoCo compile errors (a wall/door overlap or a bad
 `<include>` reference raises immediately here), spawn position `(0.0,
 0.0)`.
 
-- [ ] **Step 4: Drive-through check — confirm the robot doesn't clip walls at the turn, empirically verify the three cameras**
+- [ ] **Step 4: Drive-through check — confirm the robot doesn't clip walls at the turn, render the three cameras to real images and look at them**
 
 This is a real, physical check, not a proxy — drive the robot along the
 *intended* route by hand (straight legs + an explicit turn), through the
-narrowest part of the layout (the junction), and confirm it doesn't get
-stuck or visibly clip:
+narrowest part of the layout (the junction), confirm it doesn't get stuck
+or visibly clip, and render each named camera to a PNG via MuJoCo's own
+offscreen renderer so the framing can actually be inspected (a live
+interactive-viewer window can't be watched by an unattended process —
+this is the way to *see* the result rather than assume it):
 
 ```bash
+mkdir -p /tmp/corridor_camera_check
 .venv/bin/python -c "
 import time
+import mujoco
 from sim.concierge_sim import DeliveryBotSimulator
 
 sim = DeliveryBotSimulator('sim/scene_corridor.xml')
-sim.start(headless=False)  # viewer open -- also eyeball the 3 cameras here
+sim.start(headless=True)
 try:
     sim.drive(v=0.12, omega=0.0)
     time.sleep(25)  # ~3m near arm at 0.12 m/s
@@ -218,21 +223,42 @@ try:
     status = sim.pull_status()
     print('final position:', status.base.xy)
     assert status.base.xy[0] > 2.5 and status.base.xy[1] > 2.5, status.base.xy
+
+    # Render each named camera to a real PNG, viewable via a normal image
+    # tool -- this is the actual verification, not the assert above (the
+    # assert only proves the robot reached the far arm without an
+    # exception; it says nothing about whether the walls were clipped
+    # along the way or whether any camera's framing is sensible).
+    renderer = mujoco.Renderer(sim.model, height=480, width=640)
+    from PIL import Image
+    for cam in ('top', 'chase', 'lid'):
+        renderer.update_scene(sim.data, camera=cam)
+        img = renderer.render()
+        Image.fromarray(img).save(f'/tmp/corridor_camera_check/{cam}.png')
+    print('wrote /tmp/corridor_camera_check/{top,chase,lid}.png')
 finally:
     sim.stop()
 "
 ```
 
-While the viewer is open, manually cycle cameras (MuJoCo viewer: `[`/`]`
-or the camera dropdown) to `top`, `chase`, and `lid` and confirm each
-shows a sensible view (top: whole floor plan from above; chase: robot
-from behind/beside as it drives; lid: framed close on the door area).
-**If any camera's framing is wrong, adjust its `pos`/`xyaxes` values and
-re-run this step** — these starting values are a reasoned guess, not a
-verified fit, exactly like every other empirically-tuned constant in this
-project (`CTRL_PER_MPS`, the door `kp`/`kv` values). Do not proceed to
-Task 2 until the robot visibly clears the turn without clipping and all
-three cameras look right.
+(If `PIL`/`Pillow` isn't already available in `.venv`, `uv pip install
+--python .venv pillow` first — this is a dev-only dependency for saving
+the rendered array to disk, not something the running application needs.)
+
+**Then actually look at all three PNGs** (Read/open
+`/tmp/corridor_camera_check/top.png`, `chase.png`, `lid.png`) and judge
+each on its own merits: `top` should show the whole L-shaped floor plan
+from directly above with the robot visible somewhere on it; `chase`
+should show the robot from behind/beside with a sense of the corridor
+around it; `lid` should be framed close enough on the door area that the
+lid mechanism is the dominant thing in frame, not a distant speck. **If
+any camera's framing is wrong, adjust its `pos`/`xyaxes` values in
+`delivery_bot_v2.xml`/`scene_corridor.xml` and re-run this step** — these
+starting values are a reasoned guess, not a verified fit, exactly like
+every other empirically-tuned constant in this project (`CTRL_PER_MPS`,
+the door `kp`/`kv` values). Do not proceed to Task 2 until the robot
+visibly clears the turn without clipping (per the position assertion) and
+all three rendered images actually look right on inspection.
 
 - [ ] **Step 5: Commit**
 
@@ -251,8 +277,8 @@ this is the one small, additive, backward-compatible exception to the
 design's original 'delivery_bot_v2.xml stays unchanged' framing, flagged
 explicitly in this plan's Global Constraints. Verified live: robot spawns
 at the desk origin, drives the full near-arm/turn/far-arm route without
-clipping, all three named cameras (top/chase/lid) visually confirmed in
-the viewer.
+clipping, all three named cameras (top/chase/lid) offscreen-rendered to
+PNGs and visually confirmed correctly framed.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
