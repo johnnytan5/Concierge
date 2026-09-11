@@ -687,6 +687,8 @@ function:
         inventory.insert_tool_call_event = lambda name, args, summary: logged_events.append(name)
         inventory.decrement_stock = lambda item_names: None
         inventory.insert_delivery = lambda task: None
+        inventory.insert_escalation = lambda reason, room: None  # escalate_to_frontdesk hits
+                                                                    # this same asyncio issue too
 
         menu = h.dispatch("check_menu", {"items": ["nasi lemak"]})
         assert menu[0]["price"] == 8.0 and "halal" in menu[0]["dietary_tags"]
