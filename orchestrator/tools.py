@@ -146,19 +146,33 @@ class ToolHandlers:
         return {"task_id": task_id, "eta_seconds": BASE_ETA_SECONDS,
                 "dispatched_items": dispatched, "unavailable_items": unavailable}
 
+    def _newest_for_room(self, room):
+        """Newest still-live task for a room. `tasks` is never purged, so
+        the first match is the OLDEST one — on a second order to the same
+        room that means answering about the delivery that already finished.
+        Terminal phases are skipped; ties break on dispatched_at."""
+        tasks = self._state.get("tasks", {})
+        return max(
+            (t for t in tasks.values()
+             if t["room"] == room and t["phase"] not in ("DONE", "AT_DESK")),
+            key=lambda t: t.get("dispatched_at") or 0, default=None)
+
     def check_delivery_status(self, task_id=None, room=None):
         tasks = self._state.get("tasks", {})
-        t = tasks.get(task_id) if task_id else next(
-            (t for t in tasks.values() if t["room"] == room), None)
+        t = tasks.get(task_id) if task_id else self._newest_for_room(room)
         if not t:
             return {"error": "not_found"}
         remaining = t["eta_seconds"]
         if t["dispatched_at"] is not None:
             remaining = max(t["eta_seconds"] - (time.time() - t["dispatched_at"]), 0.0)
+        # position comes from the robot that OWNS this task — state["robot"]
+        # (singular) is gone, and with two robots "the" robot is meaningless
+        r = next((r for r in self._state.get("robots", {}).values()
+                  if r.get("current_task") == t["task_id"]), {})
         return {
             "task_id": t["task_id"],
             "phase": t["phase"],
-            "position": round(self._state.get("robot", {}).get("pose_frac", 0.0), 2),
+            "position": round(r.get("pose_frac", 0.0), 2),
             "eta_seconds": round(remaining, 1),
         }
 
@@ -168,23 +182,39 @@ class ToolHandlers:
         return {"task_id": task_id, "status": "amend_queued"}
 
     def recall_robot(self, task_id, reason):
+        # Never ack a no-op: the prompt tells the model to trust tool
+        # results, so a blanket {"ack": True} makes it confidently tell a
+        # guest the robot was recalled when nothing happened. The engine
+        # recalls from QUEUED/COLLECTING/EN_ROUTE/ARRIVED; only a finished
+        # task or an unknown id is genuinely un-recallable.
+        t = self._state.get("tasks", {}).get(task_id)
+        if not t:
+            return {"ack": False, "reason": "task_not_found"}
+        if t["phase"] in ("DONE", "AT_DESK"):
+            return {"ack": False, "reason": f"already_finished:{t['phase']}"}
         self._q.put({"cmd": "recall", "task_id": task_id, "reason": reason})
-        return {"ack": True}
+        return {"ack": True, "phase": t["phase"]}
 
     def get_fleet_state(self):
+        tasks = self._state.get("tasks", {})
         robots = self._state.get("robots", {})
         return {"robots": [
             {"robot_id": rid, "phase": r.get("phase"), "current_task_id": r.get("current_task"),
+             # room the robot is working, from its active task — the tool
+             # description promises this field, so it has to actually arrive
+             "room": tasks.get(r.get("current_task"), {}).get("room"),
              "battery": r.get("battery", 100.0), "pose_frac": r.get("pose_frac", 0.0)}
             for rid, r in robots.items()
         ]}
 
     def announce_arrival(self, room):
-        tasks = self._state.get("tasks", {})
-        t = next((t for t in tasks.values() if t["room"] == room), None)
-        if t:
-            self._q.put({"cmd": "announce", "task_id": t["task_id"]})
-        return {"ack": True}
+        t = self._newest_for_room(room)  # newest live task, not the oldest stale one
+        if not t:
+            # same reasoning as recall_robot: don't ack an announce that
+            # was never enqueued
+            return {"ack": False, "reason": "no_active_delivery_for_room"}
+        self._q.put({"cmd": "announce", "task_id": t["task_id"]})
+        return {"ack": True, "task_id": t["task_id"]}
 
     def escalate_to_frontdesk(self, reason):
         inventory.insert_escalation(reason, None)
@@ -256,16 +286,37 @@ if __name__ == "__main__":
         tid = result["task_id"]
         state["tasks"][tid] = {"task_id": tid, "room": "1204", "phase": "EN_ROUTE",
                                 "dispatched_at": time.time(), "eta_seconds": 90.0}
+        # the robot that owns the task is where `position` has to come from
+        state["robots"]["robot_1"].update({"phase": "EN_ROUTE", "current_task": tid,
+                                            "pose_frac": 0.73})
 
         status = h.dispatch("check_delivery_status", {"task_id": tid})
         assert status["phase"] == "EN_ROUTE"
+        assert status["position"] == 0.73, status  # not the deleted state["robot"] -> 0.0
 
-        ack = h.dispatch("recall_robot", {"task_id": tid, "reason": "guest cancelled"})
-        assert ack == {"ack": True}
-        assert q.items[-1]["cmd"] == "recall"
+        # a finished task for the same room must not shadow a live one
+        state["tasks"]["stale"] = {"task_id": "stale", "room": "1204", "phase": "DONE",
+                                    "dispatched_at": 1.0, "eta_seconds": 90.0}
+        by_room = h.dispatch("check_delivery_status", {"room": "1204"})
+        assert by_room["task_id"] == tid, by_room
+
+        announced = h.dispatch("announce_arrival", {"room": "1204"})
+        assert announced["ack"] is True and q.items[-1]["task_id"] == tid, (announced, q.items[-1])
+        no_such_room = h.dispatch("announce_arrival", {"room": "9999"})
+        assert no_such_room["ack"] is False, no_such_room
 
         fleet = h.dispatch("get_fleet_state", {})
         assert fleet["robots"][0]["robot_id"] == "robot_1"
+        assert fleet["robots"][0]["room"] == "1204", fleet  # description promises `room`
+
+        # recall must not ack a no-op: unknown id and finished task both fail
+        assert h.dispatch("recall_robot", {"task_id": "nope", "reason": "x"})["ack"] is False
+        assert h.dispatch("recall_robot", {"task_id": "stale", "reason": "x"})["ack"] is False
+        assert q.items[-1]["cmd"] == "announce", "no recall command for a no-op recall"
+
+        ack = h.dispatch("recall_robot", {"task_id": tid, "reason": "guest cancelled"})
+        assert ack == {"ack": True, "phase": "EN_ROUTE"}, ack
+        assert q.items[-1]["cmd"] == "recall"
 
         esc = h.dispatch("escalate_to_frontdesk", {"reason": "late checkout"})
         assert esc == {"ack": True}
@@ -274,7 +325,9 @@ if __name__ == "__main__":
         assert "error" in unknown
 
         assert logged_events == ["check_menu", "dispatch_delivery", "dispatch_delivery",
-                                   "check_delivery_status", "recall_robot", "get_fleet_state",
+                                   "check_delivery_status", "check_delivery_status",
+                                   "announce_arrival", "announce_arrival", "get_fleet_state",
+                                   "recall_robot", "recall_robot", "recall_robot",
                                    "escalate_to_frontdesk", "not_a_real_tool"], logged_events
 
         print("tools self-check OK")
