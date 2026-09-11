@@ -675,13 +675,18 @@ function:
                              "dietary_tags": [], "available": False, "stock_count": 0},
         }
 
-        # insert_tool_call_event uses asyncio.get_running_loop() internally
-        # (fire-and-forget, per the spec) -- there's no running loop in this
-        # plain synchronous self-check, so stub it out rather than adding an
-        # asyncio.run() wrapper just for this. Same offline-check philosophy
-        # as the fake inventory cache above: no live Supabase needed here.
+        # Every fire-and-forget write in inventory.py (decrement_stock,
+        # insert_delivery, insert_tool_call_event) uses
+        # asyncio.get_running_loop() internally -- there's no running loop
+        # in this plain synchronous self-check, so ALL THREE must be
+        # stubbed, not just the one this task adds. dispatch_delivery's
+        # success path calls decrement_stock + insert_delivery too. Same
+        # offline-check philosophy as the fake inventory cache above: no
+        # live Supabase needed here.
         logged_events = []
         inventory.insert_tool_call_event = lambda name, args, summary: logged_events.append(name)
+        inventory.decrement_stock = lambda item_names: None
+        inventory.insert_delivery = lambda task: None
 
         menu = h.dispatch("check_menu", {"items": ["nasi lemak"]})
         assert menu[0]["price"] == 8.0 and "halal" in menu[0]["dietary_tags"]
