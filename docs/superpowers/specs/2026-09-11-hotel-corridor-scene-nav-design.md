@@ -29,9 +29,13 @@ tree since the project's earliest planning.
   a delivery (desk and room), not just the room — this is a real, small
   gap in the current sim (`open_door()` is only called on arrival today,
   confirmed by inspection of `engine.py`'s `_advance()`).
-- A demo-recordable result: two named fixed cameras (`top`, `chase`) so a
-  recording script can cut between a floor-plan overview and a
-  robot-following shot, instead of relying on live mouse control.
+- The robot speaks, out loud, at both door-open moments — real directions
+  to the front-desk worker at loading, a real arrival announcement at the
+  room — for the demo recording specifically (see Robot speech below).
+- A demo-recordable result: three named fixed cameras (`top`, `chase`,
+  `lid`) so a recording script can cut between a floor-plan overview, a
+  robot-following shot, and a close framing on the door mechanism during
+  the two speech/open moments, instead of relying on live mouse control.
 
 ## Non-goals
 
@@ -81,12 +85,17 @@ along into a second wing.
   floor plane with real wall geometry: static `box` geoms forming both
   corridor arms and the turn, plus one shallow colored recess + labeling
   `site` per room door.
-- **Cameras:** two named `<camera>` elements — `top` (fixed bird's-eye over
-  the whole floor plan) and `chase` (`mode="track"`, following the robot
-  body from behind/beside). A recording script selects between them;
-  the interactive viewer (`mujoco.viewer.launch_passive`) remains
-  free-orbit by default regardless — these are additional fixed options,
-  not a restriction on manual control.
+- **Cameras:** three named `<camera>` elements — `top` (fixed bird's-eye
+  over the whole floor plan), `chase` (`mode="track"`, following the robot
+  body from behind/beside for the corridor drive), and `lid` (attached to
+  the robot body, framed close on the lid mechanism specifically — since
+  `mode="track"` follows the robot's position, this stays correctly framed
+  on the lid at *both* open moments, desk and room, without retargeting).
+  A recording script cuts to `lid` specifically during the two door-open
+  windows (see Robot speech below) and `chase`/`top` otherwise. The
+  interactive viewer (`mujoco.viewer.launch_passive`) remains free-orbit
+  by default regardless — these are additional fixed options, not a
+  restriction on manual control.
 - `sim/concierge_sim.py`/`DeliveryBotSimulator` is **unchanged** — it
   already takes a model path as a constructor argument.
 
@@ -167,6 +176,60 @@ Two functions, both pure/stateless aside from a cached read of
   `task_engine`'s own running simulator state is never queried from the
   orchestrator.
 
+## Robot speech (demo-recording only)
+
+**Not the same thing as `announce_arrival`.** The existing `announce_arrival`
+tool is the *voice agent* telling the *guest, over the phone*, that a
+delivery has arrived — LLM-triggered, conversational, unrelated to physical
+location. This is new and separate: the *robot itself*, physically, speaking
+out loud when its own lid opens — automatic, tied directly to the FSM's
+door-open transitions, not to any tool call. Confirmed today's
+`announce_arrival` is a pure state flag with no audio anywhere
+(`engine.py:115`, `t["announced"] = True`) — this section adds real audio
+for the first time, and it's a distinct feature from that flag, not a
+wiring-up of it.
+
+- **New `task_engine/speech.py`**: `announce(text: str)` — shells out to
+  macOS's `say` command via `subprocess.Popen(["say", text])`, **not**
+  `subprocess.run` — `say` takes multiple seconds to finish speaking a
+  sentence, and `_advance()` runs inside the 5Hz tick loop shared by both
+  robots' physics stepping; a blocking call would freeze both robots'
+  simulation for the duration of the sentence. `Popen` fires it and moves
+  on immediately, same fire-and-forget spirit as this project's existing
+  Supabase writes. Guarded by `sys.platform == "darwin"`; on any other
+  platform, prints the text instead of raising, so this never becomes a
+  hard dependency or a crash risk on a non-macOS machine. Zero new pip
+  dependencies.
+- **`engine.run()` gains a `speak: bool = False` parameter**, threaded
+  through to `_advance()`. Defaults off — the real production entry point
+  (`orchestrator/agent.py`'s spawned `multiprocessing.Process`, headless,
+  Process 2) never passes `speak=True` and never shells out to `say`. Only
+  a demo-recording entry point (see below) turns it on.
+- **Two speech triggers, each one-shot per task** (new task-dict fields
+  `speech_done_collecting`/`speech_done_arrived`, distinct from the
+  existing `announced` field to avoid confusion with the unrelated
+  guest-facing tool) — `open_door()` is idempotent and fine to call every
+  tick, but speaking the same sentence every 200ms while waiting for a
+  button press would not be:
+  - **On first entering `COLLECTING`** (lid opens): *"Please load: {item
+    list} for room {room}."* — real directions to the front-desk worker
+    about what to physically put in, generated from the task's actual
+    `items`, not a canned phrase.
+  - **On first entering `ARRIVED`** (lid opens): *"Delivery for room
+    {room} has arrived. Please collect your items."* — matches
+    `announce_arrival`'s own tool description's promised phrasing and
+    `PLAN.md` S5's example style.
+- **Demo entry point**: since these triggers live inside `engine.py`'s
+  real FSM (`_advance()`), not the simple canned `concierge_sim.demo()`
+  sequence `run_viewer.py` currently runs, showing this on camera needs a
+  new small recording script that spawns one real `engine.run(speak=True)`
+  with `headless=False` for at least one robot, dispatches a real task,
+  and presses the LED-screen commands (`complete_loading`/
+  `complete_collection`) — same pattern already proven in Sub-project A's
+  Task 9 integration check, just with the viewer open and speech on
+  instead of headless and silent. This is an implementation-plan detail,
+  not a new architectural question.
+
 ## Testing / verification approach
 
 Following this project's established convention (real self-checks against
@@ -188,6 +251,14 @@ real physics, never mocked theater):
   room in one recorded pass — the actual acceptance criterion for the
   "door symmetry" goal, since a viewer's own eyes are the only thing that
   meaningfully checks "does this look right on camera."
+- `speech.py`'s own self-check: call `announce()` with `speak=True` on
+  macOS and confirm it returns immediately (asserts on a wall-clock
+  duration well under the sentence's real speaking time — the whole point
+  of `Popen` over `run`), and confirm the non-macOS fallback path prints
+  rather than raising (mockable via monkeypatching `sys.platform` for that
+  one assertion, real subprocess call otherwise). The new recording
+  script is the actual acceptance test for content/timing correctness —
+  hearing the two lines said, at the right moments, in one recorded pass.
 
 ## Risks
 
@@ -208,3 +279,15 @@ real physics, never mocked theater):
   shared), but worth stating so it isn't mistaken for a bug when two
   viewer windows both show a "chase" view of their own robot, not of each
   other.
+- **The one-shot speech guard is the real failure mode to test, not the
+  `say` call itself.** If `speech_done_collecting`/`speech_done_arrived`
+  aren't set correctly on the *first* tick of each phase, the tick loop
+  (5Hz) would either fire `say` repeatedly (stacking overlapping audio
+  every 200ms) or never fire at all. Test this specifically — assert the
+  flag flips exactly once across a multi-tick `COLLECTING`/`ARRIVED`
+  dwell, not just that `announce()` works in isolation.
+- **macOS-only, by design, not by oversight.** `speak` defaults to
+  `False` everywhere except the new recording script, so this never
+  affects anyone running the project on Linux/Windows — but if the demo
+  is ever recorded on a different machine, confirm `say` is available
+  there or accept the printed-text fallback.
