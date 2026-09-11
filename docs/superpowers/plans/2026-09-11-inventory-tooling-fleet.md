@@ -1211,10 +1211,24 @@ Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
 
 - [ ] **Step 1: Add the import and polling/mirroring calls to `run()`**
 
-Add near the top imports:
+Add near the top imports, right after the existing `_SIM_DIR`/`sys.path`
+lines — same pattern already used one import above it for
+`concierge_sim` (a flat sibling-module import via an explicit
+`sys.path` insert), not a package-qualified import. `engine.py`'s
+established self-check convention throughout this project is running it
+as a bare script (`python task_engine/engine.py`), which puts
+`task_engine/`'s own directory on `sys.path[0]`, not the repo root — so
+`from task_engine import supabase_sync` only resolves under `-m`
+invocation and breaks the bare-script convention. `supabase_sync.py`
+lives in the same directory as `engine.py` (both are `task_engine/`
+files), so this is exactly the sibling-import case `_SIM_DIR` already
+solves one line above:
 ```python
-from task_engine import supabase_sync
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import supabase_sync
 ```
+(Call sites elsewhere in this task stay `supabase_sync.poll_pending_commands(...)`
+etc. unchanged — only the import statement changes, not how it's used.)
 
 Replace the `run()` function's body with this version (only the parts
 inside the `while True:` loop change — add a `tick_count` counter, real

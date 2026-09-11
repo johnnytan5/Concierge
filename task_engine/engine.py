@@ -30,7 +30,9 @@ import uuid
 _SIM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sim"))
 sys.path.insert(0, _SIM_DIR)
 from concierge_sim import DeliveryBotSimulator  # noqa: E402
-from task_engine import supabase_sync
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import supabase_sync
 
 MODEL_PATH = os.path.join(_SIM_DIR, "delivery_bot_v2.xml")
 
