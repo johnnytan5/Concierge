@@ -46,7 +46,7 @@
 
 .node {
   position: relative;
-  background: var(--bg);
+  background: var(--surface);
   border: 1px solid var(--divider);
   color: var(--fg-dim);
   font-family: var(--font-geist-mono), ui-monospace, monospace;
@@ -89,7 +89,7 @@
  * color inline and get their own ring color below.
  */
 .node.active {
-  color: var(--fg);
+  color: var(--foreground);
   border-color: var(--red);
   background: var(--surface);
   box-shadow: 0 0 0 1px var(--red);
