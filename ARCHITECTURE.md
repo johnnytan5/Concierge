@@ -56,7 +56,7 @@ Constraints that must never be violated live in `CLAUDE.md`.
 | Layer | Choice | Note |
 |---|---|---|
 | Voice | AssemblyAI Voice Agent API | Inline `session.update` config (not a stored agent) — see `orchestrator/agent.py` |
-| LLM | Claude via AssemblyAI gateway (`byo-llm`) | See CLAUDE.md constraint 6; `llm: [{base_url, model, api_key}]` in session config |
+| LLM | BYO-LLM via OpenRouter (`qwen/qwen3.8-flash`) | See CLAUDE.md constraint 6 — not AssemblyAI's own gateway, that account has zero model access there. Verified end-to-end incl. tool-calling; cheap model chosen deliberately |
 | Call input | Local mic/speaker (simulated front-desk line) | No Twilio/SIP — raw API key + `Bearer` header, no browser/token needed |
 | Physics | MuJoCo 3.x + custom cabinet-bot MJCF | `sim/delivery_bot_v2.xml` + `sim/concierge_sim.py`, Python 3.10 |
 | Scenes | Hand-built corridor MJCF | Corridor + 3 doors is enough — pending, Day 8-14 |
@@ -96,23 +96,57 @@ Constraints that must never be violated live in `CLAUDE.md`.
   `keyterms` (bias transcription toward names/jargon — use for room
   numbers, guest names, local dish names), `turn-taking` (silence
   thresholds, interruption sensitivity), `byo-llm`, `http-tools`.
-- BYO-LLM **requires a stored agent** (`POST /v1/agents`) — confirmed
-  live 2026-09-07 that sending `llm` on inline `session.update` is
-  rejected outright: `session.error` `{"code": "invalid_value", "message":
-  "BYO LLM config is not allowed on session.update; define it on a stored
-  agent via POST /v1/agents", "param": "llm"}`. The docs page that shows
-  the `llm` field schema (`/docs/voice-agents/voice-agent-api/
-  connect-your-own-llm`) doesn't call out this restriction explicitly —
-  found out the hard way, don't skip live-testing this kind of thing
-  again on the strength of a docs page alone.
-  `session.llm` is an **array**, not a single object —
-  `[{"base_url": "https://llm-gateway.assemblyai.com/v1", "model":
-  "claude-sonnet-5", "api_key": "..."}]`. Send `"llm": []` to revert to
-  the managed default model. Model id strings are exact and versioned —
-  fetch the current list from `/docs/llm-gateway/available-models`
-  before hardcoding one; don't assume `orchestrator/agent.py`'s
-  `LLM_MODEL` constant still matches that list without checking its
-  verified-on date first.
+- **AssemblyAI's own LLM Gateway (`llm-gateway.assemblyai.com`) has zero
+  model access on this account — do not use it.** Confirmed live
+  2026-09-11: a direct chat-completions call to the gateway with every
+  Claude/Gemini model string from `/docs/llm-gateway/available-models`
+  came back `400 {"metadata": {"errors": ["Your account does not have
+  access to this LLM Gateway model"]}}` — every one, no exceptions.
+  (GPT model strings came back a *different* error, `"model X is not
+  supported"` — those names just aren't recognized by this gateway at
+  all, a separate thing from the access restriction.) Inside the Voice
+  Agent API this failure was invisible: every LLM-driven turn came back
+  `reply.done: status="completed"` with zero `transcript.agent`, zero
+  `tool.call`, and near-silent `reply.audio` (measured peak amplitude
+  ~2/32767, against ~20000+/32767 for real speech) — no `session.error`
+  at all. **If a live session ever looks like that again** — replies
+  that "complete" but say and do nothing — test the LLM endpoint
+  directly and in isolation (a bare `curl`/`urllib` POST to its
+  `/chat/completions`) before assuming it's a bug in this codebase;
+  that one request is what actually found this, not reasoning about the
+  voice pipeline.
+- **Fixed with OpenRouter** (`https://openrouter.ai/api/v1`,
+  `OPENROUTER_API_KEY` in `.env`) — a genuinely OpenAI-Chat-Completions-
+  shaped endpoint (unlike Anthropic's own API, which uses a different
+  wire format and isn't a drop-in fit for `llm.base_url`). Verified in
+  three stages, each before moving to the next: (1) a bare completion
+  against OpenRouter directly — real content back; (2) OpenAI-style
+  tool-calling against OpenRouter directly — correct `tool_calls` with
+  right name/arguments; (3) the full stack through the Voice Agent API
+  — real multi-item, multi-turn conversation, correct `dispatch_delivery`
+  (asked for the room number when missing, then called the tool once
+  given). Stage 3 is the one that mattered most: it confirms the Voice
+  Agent API *does* correctly bridge tool-calling through to a BYO-LLM
+  backend, which was unverified before (the AssemblyAI-gateway path
+  never got that far). First confirmed working with
+  `anthropic/claude-fable-5.1` (the only `anthropic/*` model in
+  OpenRouter's catalog at the time — searched live, no sonnet/opus/haiku
+  entries there currently). **Current model: `qwen/qwen3.8-flash`** —
+  switched for cost (~$0.5/M completion tokens vs. Claude's, ~40x
+  cheaper), re-verified with the same 3-stage process including
+  tool-calling on a multi-item request before wiring in. Re-check
+  OpenRouter's `/api/v1/models` for pricing/availability if either model
+  ever 404s or costs look off.
+- BYO-LLM **requires a stored agent** (`POST /v1/agents`) regardless of
+  which provider it points at — confirmed live 2026-09-07 that sending
+  `llm` on inline `session.update` is rejected outright: `session.error`
+  `{"code": "invalid_value", "message": "BYO LLM config is not allowed
+  on session.update; define it on a stored agent via POST /v1/agents",
+  "param": "llm"}`. `session.llm` is an **array**, not a single object —
+  `[{"base_url": "...", "model": "...", "api_key": "..."}]`. Send
+  `"llm": []` (or omit it) for AssemblyAI's own managed default model
+  instead. `orchestrator/agent.py`'s `USE_BYO_LLM` flag controls whether
+  the `llm` block is sent at all.
 - **Stored agent creation** (`POST /v1/agents`, see
   `orchestrator/agent.py`'s `agent_definition()`/`ensure_agent()`):
   required top-level fields are `name`, `system_prompt`, and `voice`

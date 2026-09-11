@@ -144,7 +144,7 @@ Three processes. The separation is not optional — a blocking `mj_step` inside 
 | Layer | Choice | Note |
 |---|---|---|
 | Voice | AssemblyAI Voice Agent API | Inline `session.update` config (not a stored agent) — see `orchestrator/agent.py` |
-| LLM | Claude via the AssemblyAI gateway (`byo-llm`) | `llm: [{base_url, model, api_key}]` in session config; Path 1 does *not* cost you LLM control |
+| LLM | BYO-LLM via OpenRouter (`qwen/qwen3.8-flash`) | AssemblyAI's own gateway has zero model access on this account, confirmed live; OpenRouter verified end-to-end incl. tool-calling, cheap model chosen deliberately. See CLAUDE.md constraint 6 |
 | Call input | Local mic/speaker (simulated front-desk line) | No Twilio/SIP — raw API key + `Bearer` header, no browser/token needed |
 | Physics | MuJoCo 3.x + custom cabinet-bot MJCF | `sim/delivery_bot_v2.xml` + `sim/concierge_sim.py`, Python 3.10 |
 | Scenes | Hand-built MJCF corridor | Corridor + 3 doors is enough — pending, Day 8-14 |

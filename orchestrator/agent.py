@@ -74,7 +74,18 @@ load_dotenv()
 WS_URL = "wss://agents.assemblyai.com/v1/ws"
 AGENTS_URL = "https://agents.assemblyai.com/v1/agents"
 SAMPLE_RATE = 24_000
-LLM_MODEL = "claude-sonnet-5"  # verified live against /docs/llm-gateway/available-models, 2026-09-06
+# BYO-LLM via OpenRouter — a genuinely OpenAI-Chat-Completions-shaped
+# endpoint (unlike Anthropic's own API), so it's a drop-in fit for
+# `llm.base_url`. AssemblyAI's own gateway has zero model access on this
+# account (see agent_definition()'s docstring) — OpenRouter does,
+# confirmed live 2026-09-11: both a plain completion and OpenAI-style
+# tool-calling tested directly against it, standalone, before wiring in.
+LLM_BASE_URL = "https://openrouter.ai/api/v1"
+LLM_MODEL = "qwen/qwen3.8-flash"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
+                                    # live 2026-09-11: correct tool-calling on a multi-item
+                                    # dispatch_delivery request, standalone against OpenRouter
+USE_BYO_LLM = True  # via OpenRouter (OPENROUTER_API_KEY in .env), not AssemblyAI's own
+                     # gateway — that one has zero model access on this account
 
 SYSTEM_PROMPT = (
     "You are the front-desk voice assistant for a hotel. Guests and staff "
@@ -105,8 +116,36 @@ def agent_definition(api_key: str) -> dict:
     """Body for POST /v1/agents (stored agent). Required top-level fields
     per the live API: name, system_prompt, voice ({"voice_id": ...}) —
     NOT the same shape as session.update's inline config (there's no
-    top-level "voice" there, and `llm` is rejected there entirely)."""
-    return {
+    top-level "voice" there, and `llm` is rejected there entirely).
+
+    `api_key` here is the AssemblyAI key (for the stored-agent request's
+    own auth) — NOT what goes in the `llm` block below, which needs
+    OPENROUTER_API_KEY instead. Two different keys, two different
+    purposes; don't conflate them.
+
+    BYO-LLM history, so the next person doesn't have to rediscover this:
+    AssemblyAI's own gateway (`https://llm-gateway.assemblyai.com/v1`)
+    has zero model access on this account — confirmed live 2026-09-11 by
+    testing every Claude/Gemini model string directly against it, every
+    one came back `"Your account does not have access to this LLM
+    Gateway model"`. The Voice Agent API didn't surface that as a
+    session.error — it silently returned an empty "completed" reply (no
+    text, near-silent audio, no tool.call) for every single turn, which
+    is exactly what a live session looked like before this was
+    diagnosed. Switched to OpenRouter (`https://openrouter.ai/api/v1`)
+    instead: a genuinely OpenAI-Chat-Completions-shaped endpoint (unlike
+    Anthropic's own API), verified standalone before wiring in — both a
+    plain completion and OpenAI-style tool-calling worked correctly
+    against `anthropic/claude-fable-5.1` there. What's still unverified
+    at the time of writing: whether the Voice Agent API itself correctly
+    bridges tool-calling through to a BYO-LLM backend end-to-end (vs.
+    just to its own managed model, which was proven to work). If a live
+    session ever shows replies with real text but tool.call never fires,
+    that's the thing to suspect first — test the LLM endpoint directly
+    and in isolation (like this incident did) before assuming it's a bug
+    in this codebase.
+    """
+    definition = {
         "name": "concierge-front-desk",
         "system_prompt": SYSTEM_PROMPT,
         "voice": {"voice_id": "anna"},
@@ -116,12 +155,14 @@ def agent_definition(api_key: str) -> dict:
             "keyterms": KEYTERMS,
         },
         "tools": SESSION_TOOLS,
-        "llm": [{
-            "base_url": "https://llm-gateway.assemblyai.com/v1",
-            "model": LLM_MODEL,
-            "api_key": api_key,
-        }],
     }
+    if USE_BYO_LLM:
+        definition["llm"] = [{
+            "base_url": LLM_BASE_URL,
+            "model": LLM_MODEL,
+            "api_key": os.environ["OPENROUTER_API_KEY"],
+        }]
+    return definition
 
 
 def ensure_agent(api_key: str, force_new: bool = False) -> str:
@@ -184,6 +225,9 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict):
                          callback=on_mic), \
          sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as speaker:
         mic_task = asyncio.create_task(pump_mic())
+        audio_chunk_count = 0  # debug: reply.audio was completely invisible before
+        audio_byte_total = 0
+        audio_peak_max = 0
         try:
             async for raw in ws:
                 ev = json.loads(raw)
@@ -200,13 +244,31 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict):
                     print("session error:", ev)
 
                 elif etype == "reply.audio":
-                    speaker.write(np.frombuffer(base64.b64decode(ev["data"]), dtype="int16"))
+                    raw_bytes = base64.b64decode(ev["data"])
+                    audio_chunk_count += 1  # debug: was completely invisible before
+                    audio_byte_total += len(raw_bytes)
+                    samples = np.frombuffer(raw_bytes, dtype="int16")
+                    peak = int(np.abs(samples).max()) if len(samples) else 0
+                    audio_peak_max = max(audio_peak_max, peak)  # debug: distinguishes real
+                                                                  # speech from near-silent padding
+                    speaker.write(samples)
 
                 elif etype == "tool.call":
-                    result = handlers.dispatch(ev["name"], ev["arguments"])
+                    print(f"tool.call: {ev.get('name')}({ev.get('arguments')})")  # debug
+                    try:
+                        result = handlers.dispatch(ev["name"], ev["arguments"])
+                    except Exception as e:  # don't let a handler bug silently kill the loop
+                        print(f"tool handler raised: {e!r}")
+                        result = {"error": str(e)}
                     pending_results.append((ev["call_id"], result))
 
                 elif etype == "reply.done":
+                    print(f"reply.done: status={ev.get('status')!r} audio_chunks={audio_chunk_count} "
+                          f"audio_bytes={audio_byte_total} peak_amplitude={audio_peak_max}/32767")  # debug —
+                          # peak_amplitude near 0 means the "audio" is silence/padding, not real speech
+                    audio_chunk_count = 0
+                    audio_byte_total = 0
+                    audio_peak_max = 0
                     if ev.get("status") == "interrupted":
                         speaker.abort()
                         speaker.start()
@@ -227,6 +289,11 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict):
 
                 elif etype == "transcript.agent":
                     print(f"agent: {ev.get('text', '')}")
+
+                else:
+                    # debug: catch-all so nothing (reply.started, input.speech.*,
+                    # anything not yet handled above) is silently dropped again
+                    print(f"(unhandled) {etype}: {ev}")
         finally:
             mic_task.cancel()
             await ws.send(json.dumps({"type": "Terminate"}))

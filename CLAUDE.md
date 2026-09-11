@@ -46,12 +46,35 @@ that override convenience every time.
    orchestrator process. Do not build an HTTP server just to satisfy the
    HTTP-tools pattern — it's the wrong tool for this shape of state.
 
-6. **LLM via AssemblyAI's gateway (`byo-llm` pointing at their Claude
-   gateway), not a separately hosted endpoint**, unless a specific reason
-   to switch comes up. Less plumbing, same model control. This requires a
-   **stored agent** (`POST /v1/agents`) — confirmed live that inline
-   `session.update` rejects `llm` outright. See `orchestrator/agent.py`'s
-   `ensure_agent()` and ARCHITECTURE.md for the exact request shape.
+6. **LLM: BYO-LLM via OpenRouter, not AssemblyAI's own gateway.**
+   AssemblyAI's own gateway (`llm-gateway.assemblyai.com`) turned out to
+   have zero model access on this account — confirmed live 2026-09-11 by
+   testing every Claude/Gemini model string directly against it, every
+   one came back `"Your account does not have access to this LLM
+   Gateway model"`. Inside the Voice Agent API that failure never
+   surfaced as an error — it silently returned an empty "completed"
+   reply (no text, near-silent audio, no tool.call) every single turn,
+   which is exactly what a real session looked like before this was
+   diagnosed. OpenRouter (`https://openrouter.ai/api/v1`,
+   `OPENROUTER_API_KEY` in `.env`, model `qwen/qwen3.8-flash` — cheap,
+   ~$0.5/M completion tokens vs. Claude's; swapped in after the first
+   working model (`anthropic/claude-fable-5.1`) turned out pricier than
+   needed) has no such restriction and is verified end-to-end through
+   the *whole* stack, on both models: a
+   real multi-item, multi-turn voice conversation with correct
+   `dispatch_delivery` (asked for the room number when it was missing,
+   then called the tool with all items once given) and real spoken
+   replies throughout. This also confirmed the one thing that was
+   genuinely unverified before — that the Voice Agent API correctly
+   bridges tool-calling through to a BYO-LLM backend, not just to its
+   own managed model. `orchestrator/agent.py`'s `USE_BYO_LLM` flag
+   controls this (currently `True`, pointed at OpenRouter). Still
+   requires a **stored agent** (`POST /v1/agents`) — confirmed live that
+   inline `session.update` rejects a nonstandard config shape outright.
+   See `orchestrator/agent.py`'s `ensure_agent()`/`agent_definition()`
+   and ARCHITECTURE.md for the exact request shape and the full
+   incident history (AssemblyAI-gateway dead end → managed-model interim
+   fix → OpenRouter as the real fix).
 
 ## Tool schema (contract — keep orchestrator and task engine in sync)
 

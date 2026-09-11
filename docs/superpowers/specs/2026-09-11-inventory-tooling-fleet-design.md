@@ -168,26 +168,28 @@ a dedicated tool for that.
    else, with a reason: `not_offered` or `out_of_stock`).
 3. If `dispatched_items` is empty, return immediately with no task
    created — nothing to send.
-4. Pick the first `IDLE` robot from the local fleet cache. If none free,
-   the task is created in `QUEUED` phase (existing single-robot queueing
-   behavior, extended to N robots — first free robot picks it up on a
-   later tick).
-5. Enqueue the existing direct `cmd_queue` dispatch command (unchanged
+4. Enqueue the existing direct `cmd_queue` dispatch command (unchanged
    path/latency — this is the voice-triggered, latency-sensitive route,
    deliberately *not* going through Supabase) with only the validated
-   items and the assigned robot id (or none, if queued).
-6. Fire-and-forget (not awaited before returning): decrement
+   items — always as a new `QUEUED` task, same as today's single-robot
+   behavior. The orchestrator does **not** pick a robot itself and keeps
+   no fleet-availability cache; robot assignment is entirely
+   `task_engine`'s job (see Fleet model below), exactly like the
+   existing single-robot promotion logic already works — this avoids
+   two places deciding the same thing.
+5. Fire-and-forget (not awaited before returning): decrement
    `stock_count` for dispatched items, insert the `deliveries` row.
-7. Return `{task_id, eta_seconds, dispatched_items, unavailable_items}`
-   so the LLM can correctly narrate partial fulfillment. If the task was
-   queued rather than assigned (both robots busy), `eta_seconds` should
-   reflect that it's an estimate pending a free robot — either the
-   existing per-trip constant plus a caveat in a returned `phase:
-   "queued"` field the LLM can voice ("it'll be a bit longer than usual,
-   both robots are out"), or omit a hard number entirely. Exact
-   presentation is an implementation choice; the requirement is that a
-   queued task must not report the same confident ETA as an
-   immediately-dispatched one.
+6. Return `{task_id, eta_seconds, dispatched_items, unavailable_items}`
+   so the LLM can correctly narrate partial fulfillment. `eta_seconds` is
+   always the standard per-trip estimate (`BASE_ETA_SECONDS`) — the
+   orchestrator returns before `task_engine`'s next tick runs, so it
+   cannot yet know whether the task will be picked up immediately or
+   queued behind a busy robot (that's decided asynchronously, up to
+   ~200ms later, per constraint 2). If the guest asks again, that's what
+   `check_delivery_status` is for — it reads the real, current phase
+   (`QUEUED` vs `EN_ROUTE`) from `task_engine`'s mirrored state, so the
+   LLM can say "still waiting for a robot to free up" accurately at that
+   point, same as any other status check.
 
 ### `escalate_to_frontdesk(reason: str)` — new
 Fire-and-forget insert into `frontdesk_escalations`. Returns `{ack:
