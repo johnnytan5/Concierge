@@ -9,6 +9,7 @@ slow Supabase response can never block the event loop.
 """
 import asyncio
 import os
+from collections import Counter
 
 from supabase import create_client, Client
 
@@ -39,10 +40,20 @@ def refresh_cache_sync():
 
 
 async def start_refresh_loop():
-    """Run as an asyncio task: `asyncio.create_task(start_refresh_loop())`."""
+    """Run as an asyncio task: `asyncio.create_task(start_refresh_loop())`.
+
+    One failed refresh must not kill the task — an uncaught exception here
+    ends the loop silently and freezes the cache at whatever it last held,
+    with nothing in the demo indicating the menu has stopped updating. Warn
+    and keep looping instead; the previous cache contents stay serviceable."""
     loop = asyncio.get_running_loop()
     while True:
-        await loop.run_in_executor(None, refresh_cache_sync)
+        try:
+            await loop.run_in_executor(None, refresh_cache_sync)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[inventory] cache refresh failed, keeping previous cache: {e!r}")
         await asyncio.sleep(REFRESH_SECONDS)
 
 
@@ -77,15 +88,24 @@ def all_items() -> list[dict]:
 
 
 def decrement_stock(item_names: list[str]):
-    """Fire-and-forget: submitted to a thread pool, not awaited."""
+    """Fire-and-forget: submitted to a thread pool, not awaited.
+
+    Counts duplicates first ("two bottles of water" is one call with the
+    name twice): decrementing per-occurrence off the cached value would
+    write `stock-1` twice from the same stale base and lose one unit. The
+    in-place cache write afterwards keeps a same-window second order
+    honest too, until the next refresh."""
     def _do():
-        for name in item_names:
-            row = _cache.get(name.lower())
+        for name, n in Counter(x.lower() for x in item_names).items():
+            row = _cache.get(name)
             if row and row.get("stock_count") is not None:
+                new = max(row["stock_count"] - n, 0)
                 _get_client().table("inventory_items").update(
-                    {"stock_count": max(row["stock_count"] - 1, 0)}
+                    {"stock_count": new}
                 ).eq("id", row["id"]).execute()
-    asyncio.get_running_loop().run_in_executor(None, _do)
+                row["stock_count"] = new
+    # returns the Future so a test can await it; production ignores it
+    return asyncio.get_running_loop().run_in_executor(None, _do)
 
 
 def insert_delivery(task: dict):
@@ -123,6 +143,28 @@ if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
 
+    async def _duplicate_decrement_roundtrip():
+        """Real Supabase round trip: order the same item twice in ONE call
+        and prove stock drops by 2, not 1. Restores the original count
+        afterwards so the seeded demo data is left as found."""
+        name, row = next(((n, r) for n, r in _cache.items()
+                          if r.get("stock_count") is not None and r["stock_count"] >= 2), (None, None))
+        if row is None:
+            print("no stock-tracked item with count >= 2 — skipping duplicate-decrement check")
+            return
+        before = row["stock_count"]
+        try:
+            await decrement_stock([name, name])
+            after = (_get_client().table("inventory_items").select("stock_count")
+                     .eq("id", row["id"]).execute().data[0]["stock_count"])
+            assert after == before - 2, f"{name}: {before} -> {after}, expected {before - 2}"
+            assert _cache[name]["stock_count"] == after, "cache not updated in place"
+            print(f"duplicate-item decrement OK ({name}: {before} -> {after})")
+        finally:
+            _get_client().table("inventory_items").update(
+                {"stock_count": before}).eq("id", row["id"]).execute()
+            _cache[name]["stock_count"] = before
+
     def demo():
         refresh_cache_sync()
         print(f"cache loaded: {len(_cache)} items")
@@ -131,6 +173,8 @@ if __name__ == "__main__":
         assert result[0]["available"] is False
         assert result[0]["in_stock"] is False
         print("unknown-item lookup OK")
+
+        asyncio.run(_duplicate_decrement_roundtrip())
 
         print("inventory self-check OK (schema + cache read confirmed live)")
 
