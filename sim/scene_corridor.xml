@@ -1,0 +1,65 @@
+<mujoco model="concierge_hotel_corridor">
+  <!--
+    Adds real corridor geometry on top of delivery_bot_v2.xml's existing
+    checker floor (that floor is a 6x6m plane centered at the origin --
+    already big enough to cover this corridor's ~3.4m x 3.4m footprint,
+    so there's no floor to replace here, only walls/doors/cameras to add).
+    See sim/delivery_bot_v2.xml for the robot model itself, unchanged
+    except for the two camera additions in Task 1 Step 1.
+  -->
+  <include file="delivery_bot_v2.xml"/>
+
+  <asset>
+    <material name="wall_paint" rgba="0.85 0.83 0.78 1"/>
+    <material name="door_panel" rgba="0.55 0.35 0.2 1"/>
+  </asset>
+
+  <worldbody>
+    <!-- Fixed top-down camera: bird's-eye over the whole floor plan.
+         xyaxes="1 0 0  0 1 0" -> local z = world +z -> camera looks
+         straight down (MuJoCo cameras look down local -z).
+
+         pos z=6/default fovy=45 (the brief's starting guess) was verified
+         in Step 4 to work but look more like an oblique elevated shot
+         than a clean bird's-eye view: at that height/FOV the 1m-tall
+         walls show a lot of their vertical sides, and the robot -- near
+         the edge of the frame after driving to the far arm -- reads as
+         a "leaning tower" rather than a dot on a floor plan, because the
+         viewing ray out there is far from vertical. Raising the camera to
+         z=9 and narrowing fovy to 30 (same worldbody pos x/y, still
+         centered on the floor plan's bounding box) cuts that effect
+         substantially while still covering the ~3.4m x 3.6m L-shape with
+         margin -- confirmed by rendering both and comparing. -->
+    <camera name="top" mode="fixed" pos="1.5 1.5 9" xyaxes="1 0 0  0 1 0" fovy="30"/>
+
+    <!-- ============ Near arm (desk -> junction), centerline y=0 ============ -->
+
+    <!-- South wall (y=-0.3 inner face), broken by room 0803's door gap
+         (x: 0.8 to 1.2) -->
+    <geom name="wall_s_near_a" type="box" pos="0.35 -0.325 0.5" size="0.45 0.025 0.5" material="wall_paint"/>
+    <geom name="wall_s_near_b" type="box" pos="2.25 -0.325 0.5" size="1.05 0.025 0.5" material="wall_paint"/>
+    <geom name="0803" type="box" pos="1.0 -0.325 0.5" size="0.2 0.025 0.5" material="door_panel"/>
+
+    <!-- North wall (y=+0.3 inner face), runs only to x=2.7 (must stop
+         where the far arm's corridor opens up), broken by 0804's gap -->
+    <geom name="wall_n_near_a" type="box" pos="0.85 0.325 0.5" size="0.95 0.025 0.5" material="wall_paint"/>
+    <geom name="wall_n_near_b" type="box" pos="2.45 0.325 0.5" size="0.25 0.025 0.5" material="wall_paint"/>
+    <geom name="0804" type="box" pos="2.0 0.325 0.5" size="0.2 0.025 0.5" material="door_panel"/>
+
+    <!-- ============ Far arm (junction -> dead end), centerline x=3.0 ============ -->
+
+    <!-- East wall (x=+3.3 inner face), broken by room 1204's door gap -->
+    <geom name="wall_e_far_a" type="box" pos="3.325 0.35 0.5" size="0.025 0.45 0.5" material="wall_paint"/>
+    <geom name="wall_e_far_b" type="box" pos="3.325 2.25 0.5" size="0.025 1.05 0.5" material="wall_paint"/>
+    <geom name="1204" type="box" pos="3.325 1.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
+
+    <!-- West wall (x=+2.7 inner face), runs only from y=0.3 (must stop
+         where the near arm's corridor opens up), broken by 1205's gap -->
+    <geom name="wall_w_far_a" type="box" pos="2.675 1.05 0.5" size="0.025 0.75 0.5" material="wall_paint"/>
+    <geom name="wall_w_far_b" type="box" pos="2.675 2.75 0.5" size="0.025 0.55 0.5" material="wall_paint"/>
+    <geom name="1205" type="box" pos="2.675 2.0 0.5" size="0.025 0.2 0.5" material="wall_paint"/>
+
+    <!-- Dead-end cap past room 1205 -->
+    <geom name="wall_end_far" type="box" pos="3.0 3.325 0.5" size="0.3 0.025 0.5" material="wall_paint"/>
+  </worldbody>
+</mujoco>
