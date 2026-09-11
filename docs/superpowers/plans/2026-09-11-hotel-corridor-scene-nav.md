@@ -297,11 +297,14 @@ Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
   `sim.drive(v, omega)` — both from `sim/concierge_sim.py`, unchanged.
 - Produces: `path_for(room: str) -> list[tuple[float, float]]`,
   `total_length(path: list[tuple[float, float]]) -> float`,
-  `pure_pursuit_step(sim, path, progress_m, speed_mps, dt, lookahead_m=0.15,
-  arrival_tolerance_m=0.05) -> tuple[float, float, bool]` — returns the
-  already-advanced `new_progress_m` (the caller stores it directly, no
-  follow-up arithmetic), plus `frac, done`. Consumed by Task 3
-  (`engine.py`) and Task 4 (`tools.py`, `total_length` only, for ETA).
+  `pure_pursuit_step(sim, path, progress_m, speed_mps, lookahead_m=0.15,
+  arrival_tolerance_m=0.05) -> tuple[float, float, bool]` — `progress_m`
+  is derived from the robot's real measured position each call (nearest
+  point on the path, converted to arc length), **not** dead-reckoned from
+  elapsed time — no `dt` parameter, by design (see Step 2's docstring for
+  why). Returns the freshly-measured `new_progress_m` (the caller stores
+  it directly), plus `frac, done`. Consumed by Task 3 (`engine.py`) and
+  Task 4 (`tools.py`, `total_length` only, for ETA).
 
 - [ ] **Step 1: Write `task_engine/waypoints.json`**
 
@@ -383,39 +386,74 @@ def _point_at_arc_length(path: list[tuple[float, float]], s: float) -> tuple[flo
     return path[-1]
 
 
+def _closest_arc_length(path: list[tuple[float, float]], x: float, y: float) -> float:
+    """Project the real point (x, y) onto `path`'s polyline; return the
+    arc-length coordinate of the closest point on it. This is what makes
+    `pure_pursuit_step` immune to any mismatch between an assumed tick
+    duration and the sim's real elapsed time -- there is no assumed tick
+    duration, progress comes from where the robot actually is."""
+    best_s = 0.0
+    best_dist = float("inf")
+    cumulative = 0.0
+    for i in range(len(path) - 1):
+        x0, y0 = path[i]
+        x1, y1 = path[i + 1]
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if seg_len > 0:
+            t = ((x - x0) * (x1 - x0) + (y - y0) * (y1 - y0)) / (seg_len ** 2)
+            t = max(0.0, min(1.0, t))
+            px, py = x0 + t * (x1 - x0), y0 + t * (y1 - y0)
+            dist = math.hypot(x - px, y - py)
+            if dist < best_dist:
+                best_dist = dist
+                best_s = cumulative + t * seg_len
+        cumulative += seg_len
+    return best_s
+
+
 def pure_pursuit_step(sim, path: list[tuple[float, float]], progress_m: float,
-                       speed_mps: float, dt: float, lookahead_m: float = 0.15,
+                       speed_mps: float, lookahead_m: float = 0.15,
                        arrival_tolerance_m: float = 0.05,
                        steer_gain: float = 2.0) -> tuple[float, float, bool]:
-    """Advance one step along `path`. Returns (new_progress_m, frac, done)
-    -- `new_progress_m` really is the advanced value (`progress_m +
-    speed_mps * dt`, clamped to the path's total length); the caller
-    stores it directly, no follow-up arithmetic needed on its end.
+    """Advance one step along `path`. Returns (new_progress_m, frac, done).
 
-    `progress_m` is arc-length already covered so far, tracked by the
-    caller (engine.py) across ticks -- this function is otherwise
-    stateless. `dt` is the caller's own tick duration (engine.py passes
-    `1.0 / TICK_HZ`) -- kept as an explicit parameter rather than a
-    constant here so nav.py has zero dependency on engine.py's tick rate;
-    a self-check or any other caller can drive this at whatever rate it
-    wants by passing its own matching `dt`.
+    `new_progress_m` is derived from the robot's REAL measured position
+    this call (via `_closest_arc_length`), not dead-reckoned from
+    `speed_mps` and an assumed tick duration -- an earlier version of this
+    function did dead-reckon (`progress_m + speed_mps * dt`), and Task 2's
+    own implementation found a real bug because of it: on a machine where
+    `mj_step`'s realtime pacing runs slower than wall-clock (confirmed
+    ~70-80% here), a fixed nominal `dt` drifts the dead-reckoned estimate
+    ahead of the robot's real position, pulling the lookahead point onto
+    the *next* leg of the path while the robot is still physically inside
+    the previous corridor segment -- which visibly clips a wall at any
+    corner. Deriving progress from real measured position eliminates this
+    bug class outright rather than requiring every caller to supply a
+    carefully-measured `dt` to avoid it, and it's the more standard
+    pure-pursuit technique anyway (project from real position, don't
+    integrate an open-loop estimate). `progress_m` is passed in only so a
+    caller can still track/expose it (e.g. `pose_frac`) between calls --
+    this function does not use the incoming value for anything except as
+    the pre-advance value to return if the path is degenerate.
 
-    Steering uses the CURRENT (pre-advance) position -- look ahead from
-    where the robot actually is this tick, then advance progress for the
-    next call.
+    `speed_mps` still drives the actual motor command (`sim.drive`) --
+    only the *progress-tracking* arithmetic changes, not the driving
+    speed itself.
     """
     status = sim.pull_status()
     x, y = status.base.xy
     yaw = math.radians(status.base.yaw_deg)
 
-    look_x, look_y = _point_at_arc_length(path, progress_m + lookahead_m)
+    measured_s = _closest_arc_length(path, x, y)
+    new_progress_m = max(progress_m, measured_s)  # never regress from a noisy projection
+
+    look_x, look_y = _point_at_arc_length(path, new_progress_m + lookahead_m)
     bearing = math.atan2(look_y - y, look_x - x)
     heading_error = math.atan2(math.sin(bearing - yaw), math.cos(bearing - yaw))
 
     sim.drive(v=speed_mps, omega=steer_gain * heading_error)
 
     total = total_length(path)
-    new_progress_m = min(progress_m + speed_mps * dt, total) if total > 0 else 0.0
     frac = min(new_progress_m / total, 1.0) if total > 0 else 1.0
     final_x, final_y = path[-1]
     done = math.hypot(final_x - x, final_y - y) <= arrival_tolerance_m
@@ -428,17 +466,25 @@ if __name__ == "__main__":
     import time
     import sys
 
+    import mujoco
+
     _SIM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sim"))
     sys.path.insert(0, _SIM_DIR)
     from concierge_sim import DeliveryBotSimulator  # noqa: E402
 
     def demo():
         model = os.path.join(_SIM_DIR, "scene_corridor.xml")
-        dt = 0.05  # this self-check's own loop rate -- nav.py has no
-                    # dependency on engine.py's real TICK_HZ, any dt works
-                    # as long as it matches the actual sleep below
+        loop_sleep_s = 0.05  # this self-check's own polling rate -- pure_pursuit_step
+                              # has no time-step dependency at all now (progress comes
+                              # from real measured position, not dead-reckoning), so
+                              # this only paces how often the self-check *checks*, not
+                              # anything the navigation math depends on being accurate
 
-        # Straight-leg room: no corner, sanity check the basic loop.
+        # Straight-leg room: no corner, sanity check the basic loop. Tick
+        # budget (400) has real margin over the measured real-physics
+        # arrival (~248 ticks at loop_sleep_s=0.05) -- this machine's
+        # mj_step runs slower than wall-clock (confirmed ~70-80%, see
+        # Task 1's report), so a naive 1:1-pacing estimate (~200) undercounts.
         sim = DeliveryBotSimulator(model)
         sim.start(headless=True)
         try:
@@ -446,32 +492,52 @@ if __name__ == "__main__":
             progress = 0.0
             speed = 0.1
             fracs = []
-            for _ in range(200):
-                progress, frac, done = pure_pursuit_step(sim, path, progress, speed, dt)
+            for _ in range(400):
+                progress, frac, done = pure_pursuit_step(sim, path, progress, speed)
                 fracs.append(frac)
                 if done:
                     break
-                time.sleep(dt)
+                time.sleep(loop_sleep_s)
             assert done, "did not arrive at 0803 within the tick budget"
             assert all(b >= a - 1e-9 for a, b in zip(fracs, fracs[1:])), "frac not monotonic"
             print(f"0803 (straight leg): arrived, {len(fracs)} ticks, frac reached {fracs[-1]:.2f}")
         finally:
             sim.stop()
 
-        # Far-arm room: exercises the real 90-degree corner.
+        # Far-arm room: exercises the real 90-degree corner. Tick budget
+        # (1500) has real margin over the measured real-physics arrival
+        # (~1007-1014 ticks) -- this is also the case that would have hit
+        # the dead-reckoning bug the redesigned pure_pursuit_step avoids
+        # (see this task's docstring/ledger note): with progress derived
+        # from real measured position, no wall clipping occurs even
+        # though the underlying step rate is the same slower-than-realtime
+        # physics that exposed the original bug.
         sim = DeliveryBotSimulator(model)
         sim.start(headless=True)
         try:
             path = path_for("1204")
             progress = 0.0
             speed = 0.1
-            for _ in range(400):
-                progress, frac, done = pure_pursuit_step(sim, path, progress, speed, dt)
+            wall_hits = []
+            for _ in range(1500):
+                progress, frac, done = pure_pursuit_step(sim, path, progress, speed)
+                # The actual regression test for the dead-reckoning bug this
+                # task's design fix exists for: check for a real wall contact
+                # every tick, not just narrate it in a report. Direct
+                # data/model access (not pull_status()) is read-only and the
+                # same pattern used to originally diagnose this bug.
+                for i in range(sim.data.ncon):
+                    c = sim.data.contact[i]
+                    name1 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, c.geom1)
+                    name2 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, c.geom2)
+                    if any(n and n.startswith("wall_") for n in (name1, name2)):
+                        wall_hits.append((name1, name2))
                 if done:
                     break
-                time.sleep(dt)
+                time.sleep(loop_sleep_s)
             assert done, "did not arrive at 1204 (through the corner) within the tick budget"
-            print(f"1204 (through the corner): arrived at frac={frac:.2f}")
+            assert not wall_hits, f"clipped a wall during the corner drive: {wall_hits[:3]}"
+            print(f"1204 (through the corner): arrived at frac={frac:.2f}, zero wall contacts")
         finally:
             sim.stop()
 
@@ -594,7 +660,7 @@ def _drive_home(sim, task, now, terminal_phase, drive_speed, arrival_tolerance_m
     sim.close_door()  # idempotent ctrl target; covers a recall straight out of ARRIVED
     path = list(reversed(nav.path_for(task["room"])))
     task["progress_m"], _, done = nav.pure_pursuit_step(
-        sim, path, task["progress_m"], drive_speed, 1.0 / TICK_HZ,
+        sim, path, task["progress_m"], drive_speed,
         arrival_tolerance_m=arrival_tolerance_m)
     total = nav.total_length(path)
     frac = 1.0 - min(task["progress_m"] / total, 1.0) if total > 0 else 0.0  # walks 1 -> 0 on the way home
@@ -610,7 +676,7 @@ Replace `_advance`'s `EN_ROUTE` branch:
     if task["phase"] == "EN_ROUTE":
         path = nav.path_for(task["room"])
         task["progress_m"], frac, done = nav.pure_pursuit_step(
-            sim, path, task["progress_m"], drive_speed, 1.0 / TICK_HZ,
+            sim, path, task["progress_m"], drive_speed,
             arrival_tolerance_m=arrival_tolerance_m)
         if done:
             sim.stop_base()
@@ -641,56 +707,50 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
              arrival_tolerance_m: float = 0.05):
 ```
 
-**Re-anchor `progress_m` at every point where the direction of travel
-flips** — this is not a simple reset to `0.0`. `_drive_home` walks the
-*reversed* path, and a reversed path's arc length from ITS start equals
-`total_length(original_path) - <arc length already covered on the
-original path>`. For a `RETURNING` transition (guest confirmed collection
-— the robot has genuinely finished the outbound path, `progress_m` already
-equals the total), this formula happens to reduce to `0.0`, matching
-intuition. But for a `RECALLED` transition (voice recall *mid-EN_ROUTE* —
-the robot is only partway there), it does **not** reduce to `0.0`: the
-robot is physically somewhere in the middle of the corridor, and the
-reversed path's progress needs to reflect that, or pure pursuit's
-lookahead would aim at a point near the *original* path's far end (the
-room door) instead of back toward the desk — steering the wrong way. Use
-the same general formula at both transition points, in `_advance`'s
-`ARRIVED` branch:
+**Reset `progress_m` to `0.0` at every point where the direction of
+travel flips.** An earlier draft of this plan used a `total_length(path)
+- progress_m` re-anchor formula here — that was compensating for the
+*previous* (dead-reckoning) design of `pure_pursuit_step`, which is gone
+(see Task 2's corrected design: `progress_m` is now derived fresh from
+the robot's real measured position every call, not accumulated). Under
+the corrected design, a plain reset to `0.0` is not just simpler, it's
+the *correct* one: `pure_pursuit_step` will compute the right value from
+real position on its very first call against the new (reversed) path
+regardless of what `progress_m` was set to, EXCEPT that its `max(progress_m,
+measured_s)` guard (against a single noisy projection) would incorrectly
+clamp the reversed path's progress upward if a stale, larger value from
+the *outbound* path's arc length were carried over — the two paths don't
+share a coordinate system, so an old progress value is meaningless on the
+new path and must not be reused, even as a floor. `0.0` is always a safe
+floor on any fresh path. In `_advance`'s `ARRIVED` branch:
 
 ```python
     if task["phase"] == "ARRIVED":
         if confirmed:
             sim.close_door()
-            total = nav.total_length(nav.path_for(task["room"]))
-            task["progress_m"] = total - task["progress_m"]
             task["phase"] = "RETURNING"
+            task["progress_m"] = 0.0
         return task, 1.0
 ```
 
 and in `_handle`'s `recall` branch, at **both** the `EN_ROUTE` and
 `ARRIVED` cases — these are two separate code locations from `_advance`'s
 own `ARRIVED` branch above (that one fires on *guest-confirmed* collection;
-these fire on a *voice recall*), so the re-anchor has to be added in both
+these fire on a *voice recall*), so the reset has to be added in both
 places independently, not inherited from one by the other:
 
 ```python
         elif phase == "EN_ROUTE":
-            total = nav.total_length(nav.path_for(t["room"]))
-            t["progress_m"] = total - t["progress_m"]
             t["phase"] = "RECALLED"
             t["dispatched_at"] = time.time()
+            t["progress_m"] = 0.0
         elif phase == "ARRIVED":
-            total = nav.total_length(nav.path_for(t["room"]))
-            t["progress_m"] = total - t["progress_m"]
             t["phase"] = "RETURNING"  # _drive_home closes the door on the way
+            t["progress_m"] = 0.0
 ```
 
 (`QUEUED`/`COLLECTING` → `AT_DESK` doesn't touch `progress_m` — the robot
-never left the desk, so there's no outbound progress to re-anchor. For
-the `EN_ROUTE` case the formula computes a genuine partial value; for the
-`ARRIVED` case it reduces to `0.0` since `progress_m` already equals
-`total` there — same reasoning as `_advance`'s `ARRIVED` branch, computed
-independently because it's separate code, not shared.)
+never left the desk, so there's no outbound progress to reset.)
 
 - [ ] **Step 4: Door-open symmetry at `COLLECTING`**
 
@@ -787,10 +847,14 @@ real rooms directly (their real path lengths are already short — 1.0m to
             _handle({"cmd": "recall", "task_id": "t3", "reason": "guest changed mind"}, tasks)
             assert tasks["t3"]["phase"] == "AT_DESK", tasks["t3"]
 
-            # recall MID-EN_ROUTE (the case the progress_m re-anchor formula
-            # exists for -- without it, pure pursuit would aim the reversed
-            # path's lookahead at the room door instead of back toward the
-            # desk). robot_1 is free again (t1 finished above).
+            # recall MID-EN_ROUTE -- the real proof that reversing the path
+            # and resetting progress_m to 0.0 actually steers home rather
+            # than continuing toward the room. Since pure_pursuit_step now
+            # derives progress from the robot's real measured position (not
+            # a dead-reckoned/re-anchored estimate), this is what confirms
+            # the reversed-path lookahead correctly re-targets the desk
+            # direction on the very first call after recall. robot_1 is
+            # free again (t1 finished above).
             _handle({"cmd": "dispatch", "task_id": "t4", "room": "1205", "items": ["towel"]}, tasks)
             tasks["t4"]["phase"] = "COLLECTING"
             tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(), confirmed=True,
@@ -812,8 +876,8 @@ real rooms directly (their real path lengths are already short — 1.0m to
             dist_after = (pos_after_recall[0] ** 2 + pos_after_recall[1] ** 2) ** 0.5
             assert dist_after < dist_before, (
                 "recall mid-EN_ROUTE should steer back toward the desk (distance from "
-                "origin decreasing), not toward the room -- progress_m re-anchor is wrong if "
-                "this fails", pos_before_recall, pos_after_recall)
+                "origin decreasing), not toward the room -- the reversed-path progress_m "
+                "reset is wrong if this fails", pos_before_recall, pos_after_recall)
             for _ in range(400):
                 tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
@@ -839,7 +903,7 @@ real rooms directly (their real path lengths are already short — 1.0m to
             print("engine self-check OK (real corridor scene: near-arm + far-arm "
                   "rooms through the real corner, differing per-room ETA, "
                   "door-open symmetry, recall from COLLECTING/EN_ROUTE/ARRIVED "
-                  "-- including the mid-EN_ROUTE progress_m re-anchor)")
+                  "-- including the mid-EN_ROUTE reversed-path progress reset)")
         finally:
             for sim in sims.values():
                 sim.stop()
@@ -871,18 +935,17 @@ while COLLECTING (idempotent, same pattern as close_door()), mirroring the
 existing ARRIVED open/close symmetry -- previously the door only ever
 opened on arrival.
 
-Every point where travel direction flips re-anchors progress_m to
-total_length(path) - progress_m before switching to the reversed path --
-not a plain reset to 0. For a recall from ARRIVED (or guest-confirmed
-collection) that reduces to 0 since progress_m already equals the total,
-but a recall mid-EN_ROUTE needs the real partial value, or pure pursuit's
-lookahead aims at the room door instead of back toward the desk. Verified
-live: two robots to a near-arm and a far-arm room (through the real
-90-degree corner) both arrive, far-arm ETA is genuinely longer,
-door-open-at-loading confirmed; recall from COLLECTING, mid-EN_ROUTE (the
-re-anchor's own test -- asserts distance-from-desk actually decreases
-after recall, not just that the phase flag changed), and ARRIVED all
-correctly return the robot home.
+progress_m resets to 0.0 at every point where travel direction flips
+(RETURNING/RECALLED) -- safe because nav.pure_pursuit_step derives
+progress from the robot's real measured position every call, not by
+dead-reckoning, so it recomputes correctly on the reversed path's very
+first call regardless. Verified live: two robots to a near-arm and a
+far-arm room (through the real 90-degree corner) both arrive, far-arm ETA
+is genuinely longer, door-open-at-loading confirmed; recall from
+COLLECTING, mid-EN_ROUTE (asserts distance-from-desk actually decreases
+after recall, not just that the phase flag changed -- the real proof the
+reversed path steers home, not toward the room), and ARRIVED all correctly
+return the robot home.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
@@ -1385,27 +1448,39 @@ body, which `<include>` cannot inject from outside. Fixed by making Task
 1's `delivery_bot_v2.xml` change explicit, small, and justified (see
 Global Constraints) rather than silently deviating from what was approved.
 
-**Second correction, caught the same way:** the first draft of
-`pure_pursuit_step` returned `progress_m` *unchanged* (labeled
-`new_progress_m` in its own docstring, which it wasn't), pushing the
-advance-by-one-tick arithmetic onto every caller redundantly. Fixed to
-have the function own its own advance (`dt` as an explicit parameter,
-since `nav.py` has zero dependency on `engine.py`'s `TICK_HZ` this way).
-Re-deriving the fix surfaced a real, separate bug it would otherwise have
-hidden: re-anchoring `task["progress_m"]` to `0.0` at every direction
-reversal (`RETURNING`/`RECALLED`) is only correct when the robot has
-already finished the outbound leg (guest-confirmed collection, or a
-recall from `ARRIVED`) — a recall *mid*-`EN_ROUTE` needs the general
-`total_length(path) - progress_m` formula, or pure pursuit's lookahead
-aims at the room door instead of back toward the desk. This case wasn't
-in the plan's first draft of the engine self-check at all; Task 3 Step 6
-now has a dedicated assertion for it (distance-from-desk must actually
-decrease after a mid-route recall, not just the phase flag).
+**Second and third corrections — one caught during planning, one during
+Task 2's actual implementation, both fixed before the next task could
+inherit them.** During planning: the first draft of `pure_pursuit_step`
+returned `progress_m` *unchanged* (labeled `new_progress_m` in its own
+docstring, which it wasn't), and its fix (accumulating `progress_m +
+speed_mps * dt` internally) required a direction-reversal re-anchor
+formula (`total_length(path) - progress_m`) to handle a recall
+*mid*-`EN_ROUTE` correctly. During Task 2's real implementation: the
+implementer found live, with real `data.contact` evidence, that this
+dead-reckoning design itself was fragile — on a machine where `mj_step`
+runs slower than wall-clock (confirmed ~70-80% by both Task 1 and Task 2
+independently), a fixed nominal `dt` drifts the estimate ahead of the
+robot's real position, pulling the pure-pursuit lookahead onto the next
+leg of the path while the robot is still physically in the previous
+corridor segment — clipping a wall at the corner. Ruled a plan defect (my
+dead-reckoning design, not an implementer error) and fixed properly:
+`pure_pursuit_step` now derives progress from the robot's real measured
+position every call (nearest point on the path polyline), which drops the
+`dt` parameter entirely and, in turn, makes the re-anchor formula not just
+unnecessary but *wrong* — carrying a stale outbound-path progress value
+over as a floor on the reversed path's fresh measurement can wrongly clamp
+it upward, so every direction-reversal point now does a plain reset to
+`0.0` instead. Task 3 Step 6's self-check has a dedicated assertion for
+the case this whole chain of fixes was for (distance-from-desk must
+actually decrease after a mid-route recall, not just the phase flag), and
+the corner self-check in Task 2 now asserts zero wall contacts directly
+via `data.contact`, not just a final-position proxy.
 
 **Type/shape consistency:** `nav.path_for`/`nav.total_length`/
 `nav.pure_pursuit_step`'s signatures are identical everywhere they're
 referenced (Task 2 defines them; Tasks 3 and 4 consume them by these exact
-names, including the corrected `dt` parameter in every call site).
+names — no `dt` parameter anywhere, including the two `engine.py` call
+sites that briefly had one in an earlier draft).
 `task["progress_m"]` is introduced in Task 3 Step 2 and consumed
 consistently by every later reference in Task 3 (Steps 3-4) and never
 referenced again outside `engine.py`. `speech.announce`'s signature
