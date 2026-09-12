@@ -139,7 +139,7 @@ class ToolHandlers:
         self._q.put({"cmd": "dispatch", "task_id": task_id, "room": room,
                      "items": item_names, "priority": priority})
 
-        inventory.decrement_stock(item_names)
+        inventory.decrement_stock(item_names, task_id=task_id)
         inventory.insert_delivery({"task_id": task_id, "room": room, "items": item_names,
                                     "phase": "QUEUED", "priority": priority})
 
@@ -263,7 +263,7 @@ if __name__ == "__main__":
         # as the fake inventory cache above: no live Supabase needed here.
         logged_events = []
         inventory.insert_tool_call_event = lambda name, args, summary: logged_events.append(name)
-        inventory.decrement_stock = lambda item_names: None
+        inventory.decrement_stock = lambda item_names, task_id=None, source="dispatch_delivery": None
         inventory.insert_delivery = lambda task: None
         inventory.insert_escalation = lambda reason, room: None
 

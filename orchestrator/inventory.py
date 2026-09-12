@@ -87,23 +87,37 @@ def all_items() -> list[dict]:
     return [_to_public(row) for row in _cache.values()]
 
 
-def decrement_stock(item_names: list[str]):
+def decrement_stock(item_names: list[str], task_id: str | None = None,
+                     source: str = "dispatch_delivery"):
     """Fire-and-forget: submitted to a thread pool, not awaited.
 
     Counts duplicates first ("two bottles of water" is one call with the
     name twice): decrementing per-occurrence off the cached value would
     write `stock-1` twice from the same stale base and lose one unit. The
     in-place cache write afterwards keeps a same-window second order
-    honest too, until the next refresh."""
+    honest too, until the next refresh.
+
+    Also writes one `inventory_audit_log` row per distinct item changed --
+    this is the only place a stock change is recorded with its before/after
+    value and what triggered it. `stock_count` itself is updated in place
+    with no history; without this, "customer ordered 2 towels -> stock -2"
+    is unrecoverable after the fact. `task_id` correlates an audit row back
+    to `deliveries.task_id` when the change came from a real dispatch."""
     def _do():
         for name, n in Counter(x.lower() for x in item_names).items():
             row = _cache.get(name)
             if row and row.get("stock_count") is not None:
-                new = max(row["stock_count"] - n, 0)
+                before = row["stock_count"]
+                new = max(before - n, 0)
                 _get_client().table("inventory_items").update(
                     {"stock_count": new}
                 ).eq("id", row["id"]).execute()
                 row["stock_count"] = new
+                _get_client().table("inventory_audit_log").insert({
+                    "item_id": row["id"], "item_name": row["name"],
+                    "delta": new - before, "before_count": before,
+                    "after_count": new, "task_id": task_id, "source": source,
+                }).execute()
     # returns the Future so a test can await it; production ignores it
     return asyncio.get_running_loop().run_in_executor(None, _do)
 
@@ -153,17 +167,33 @@ if __name__ == "__main__":
             print("no stock-tracked item with count >= 2 — skipping duplicate-decrement check")
             return
         before = row["stock_count"]
+        audit_id = None
         try:
-            await decrement_stock([name, name])
+            await decrement_stock([name, name], task_id="selfcheck_task")
             after = (_get_client().table("inventory_items").select("stock_count")
                      .eq("id", row["id"]).execute().data[0]["stock_count"])
             assert after == before - 2, f"{name}: {before} -> {after}, expected {before - 2}"
             assert _cache[name]["stock_count"] == after, "cache not updated in place"
             print(f"duplicate-item decrement OK ({name}: {before} -> {after})")
+
+            audit_rows = (_get_client().table("inventory_audit_log").select("*")
+                          .eq("item_id", row["id"]).eq("task_id", "selfcheck_task")
+                          .order("created_at", desc=True).limit(1).execute().data)
+            assert audit_rows, "no inventory_audit_log row written for the decrement"
+            audit = audit_rows[0]
+            audit_id = audit["id"]
+            assert audit["before_count"] == before, audit
+            assert audit["after_count"] == after, audit
+            assert audit["delta"] == after - before, audit
+            assert audit["source"] == "dispatch_delivery", audit
+            print(f"inventory_audit_log OK (before={audit['before_count']}, "
+                  f"after={audit['after_count']}, delta={audit['delta']})")
         finally:
             _get_client().table("inventory_items").update(
                 {"stock_count": before}).eq("id", row["id"]).execute()
             _cache[name]["stock_count"] = before
+            if audit_id:
+                _get_client().table("inventory_audit_log").delete().eq("id", audit_id).execute()
 
     def demo():
         refresh_cache_sync()
