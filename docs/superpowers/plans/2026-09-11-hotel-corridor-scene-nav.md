@@ -431,10 +431,32 @@ def pure_pursuit_step(sim, path: list[tuple[float, float]], progress_m: float,
     bug class outright rather than requiring every caller to supply a
     carefully-measured `dt` to avoid it, and it's the more standard
     pure-pursuit technique anyway (project from real position, don't
-    integrate an open-loop estimate). `progress_m` is passed in only so a
-    caller can still track/expose it (e.g. `pose_frac`) between calls --
-    this function does not use the incoming value for anything except as
-    the pre-advance value to return if the path is degenerate.
+    integrate an open-loop estimate). `progress_m` is accepted purely for
+    call-site compatibility with earlier callers that still track/expose
+    it (e.g. `pose_frac`) between calls -- **this function does not read
+    the incoming value at all**; `new_progress_m` is always exactly
+    `_closest_arc_length`'s fresh result.
+
+    An earlier version of this function clamped `new_progress_m =
+    max(progress_m, measured_s)`, defensively "never regressing from a
+    single noisy projection" -- reasonable-sounding, but never actually
+    exercised by this task's own tests (the only near-miss found, a ~2cm
+    early snap near the far-arm corner, is a *forward* anticipation
+    artifact of nearest-point projection at a polyline vertex, not a
+    backward one the floor would catch). Task 3 found the real cost of
+    that floor with real evidence: on the REVERSED path `_drive_home`
+    feeds this function for a recall/return trip, a robot that's already
+    close to the reversed path's end (i.e. close to the desk) needs
+    `measured_s` to genuinely *decrease* for a number of ticks while it
+    completes a real course-reversal U-turn (`sim.drive` always commands
+    `v=speed_mps > 0` -- forward -- so reversing direction close to a
+    target traces a wide loop, not an instant pivot). The floor clamped
+    that legitimate regression at its highest-ever value, permanently
+    freezing the lookahead point ahead of the robot's real position --
+    the robot never turned around. Dropping the floor fixes this outright
+    and is also more honest to this function's own headline design:
+    derive progress from where the robot *is*, not from any memory of
+    where it has been.
 
     `speed_mps` still drives the actual motor command (`sim.drive`) --
     only the *progress-tracking* arithmetic changes, not the driving
@@ -444,8 +466,7 @@ def pure_pursuit_step(sim, path: list[tuple[float, float]], progress_m: float,
     x, y = status.base.xy
     yaw = math.radians(status.base.yaw_deg)
 
-    measured_s = _closest_arc_length(path, x, y)
-    new_progress_m = max(progress_m, measured_s)  # never regress from a noisy projection
+    new_progress_m = _closest_arc_length(path, x, y)
 
     look_x, look_y = _point_at_arc_length(path, new_progress_m + lookahead_m)
     bearing = math.atan2(look_y - y, look_x - x)
@@ -557,8 +578,54 @@ if __name__ == "__main__":
         assert total_length(path_for("1204")) > total_length(path_for("0803")), (
             "far-arm room should have a longer real path than a near-arm room"
         )
+
+        # Reversed-path regression test -- this is exactly the shape of
+        # scenario Task 3's mid-EN_ROUTE recall exposed as a real bug (see
+        # this task's ledger entry on the max()-floor removal above): a
+        # robot partway along a path, then handed the SAME path reversed
+        # (as `_drive_home` does for a recall/return trip), with the stale
+        # forward-path `progress_m` value passed straight through
+        # unreset -- exactly what would have permanently locked up under
+        # the old floored design, since the robot starts this leg already
+        # close to the reversed path's end and must genuinely regress for
+        # a few ticks while it completes a real course-reversal U-turn.
+        sim = DeliveryBotSimulator(model)
+        sim.start(headless=True)
+        try:
+            path = path_for("0803")
+            progress = 0.0
+            speed = 0.3  # matches engine.py's real demo speed (Task 3), not this
+                          # file's own 0.1 elsewhere -- the bug only surfaced at
+                          # this higher speed's closer-to-desk U-turn geometry
+            for _ in range(60):  # partway along the leg, nowhere near the far end
+                progress, frac, done = pure_pursuit_step(sim, path, progress, speed)
+                assert not done, "test setup bug: arrived before the reversal, tune down the tick count"
+                time.sleep(loop_sleep_s)
+            reversed_path = list(reversed(path))
+            # progress_m is deliberately NOT reset to 0.0 here -- under the
+            # corrected design it has no effect on the computation at all
+            # (see the function's own docstring), so carrying the stale
+            # forward-path value through is exactly what a real caller
+            # (engine.py's _drive_home) does, and exactly the case that
+            # would have locked up under the old max()-floor design.
+            reversed_done = False
+            for _ in range(200):
+                progress, frac, reversed_done = pure_pursuit_step(sim, reversed_path, progress, speed)
+                if reversed_done:
+                    break
+                time.sleep(loop_sleep_s)
+            assert reversed_done, (
+                "did not complete the reversed-path U-turn back to the desk within "
+                "the tick budget -- tune the budget against a real measured run "
+                "(step 3), same way the other two scenarios above document their "
+                "real measured-arrival tick counts")
+            print(f"0803 reversed (recall/return-trip regression): arrived, frac reached {frac:.2f}")
+        finally:
+            sim.stop()
+
         print("nav.py self-check OK (straight leg + real corner, both arrive; "
-              "far-arm path genuinely longer)")
+              "far-arm path genuinely longer; reversed-path recall regression "
+              "arrives without a progress lock)")
 
     demo()
 ```
@@ -683,6 +750,15 @@ def _drive_home(sim, task, now, terminal_phase, drive_speed, arrival_tolerance_m
     return task, frac
 ```
 
+The `task["progress_m"]` passed into `pure_pursuit_step` above is whatever
+stale value the *outbound* leg left behind — that's fine and needs no
+special handling: per Task 2's corrected design (see its updated
+docstring), `pure_pursuit_step` never reads the incoming `progress_m` for
+its computation at all, only returns a fresh value derived from the
+robot's real current position every call. Do not add any measured-value
+initialization or pre-computation here beyond what's shown above; it
+would be dead code.
+
 Replace `_advance`'s `EN_ROUTE` branch:
 
 ```python
@@ -720,50 +796,43 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
              arrival_tolerance_m: float = 0.05):
 ```
 
-**Reset `progress_m` to `0.0` at every point where the direction of
-travel flips.** An earlier draft of this plan used a `total_length(path)
-- progress_m` re-anchor formula here — that was compensating for the
-*previous* (dead-reckoning) design of `pure_pursuit_step`, which is gone
-(see Task 2's corrected design: `progress_m` is now derived fresh from
-the robot's real measured position every call, not accumulated). Under
-the corrected design, a plain reset to `0.0` is not just simpler, it's
-the *correct* one: `pure_pursuit_step` will compute the right value from
-real position on its very first call against the new (reversed) path
-regardless of what `progress_m` was set to, EXCEPT that its `max(progress_m,
-measured_s)` guard (against a single noisy projection) would incorrectly
-clamp the reversed path's progress upward if a stale, larger value from
-the *outbound* path's arc length were carried over — the two paths don't
-share a coordinate system, so an old progress value is meaningless on the
-new path and must not be reused, even as a floor. `0.0` is always a safe
-floor on any fresh path. In `_advance`'s `ARRIVED` branch:
+**Do NOT reset `progress_m` anywhere when the direction of travel
+flips.** Two earlier drafts of this plan disagreed on this point --
+first a `total_length(path) - progress_m` re-anchor formula (for the
+original dead-reckoning design), then a plain reset to `0.0` (for the
+first corrected, floored design) -- both were compensating for a design
+`pure_pursuit_step` no longer has. Now that the function's `max(progress_m,
+measured_s)` floor is gone entirely (see Task 2's second correction,
+prompted by this exact task finding the floor permanently locks progress
+during a real recall's course-reversal U-turn), `progress_m` has no
+computational effect on `pure_pursuit_step` at all -- resetting it is
+harmless but pointless, and NOT resetting it is equally correct. Simplest
+is best here: don't touch `task["progress_m"]` anywhere below, only what's
+shown. In `_advance`'s `ARRIVED` branch:
 
 ```python
     if task["phase"] == "ARRIVED":
         if confirmed:
             sim.close_door()
             task["phase"] = "RETURNING"
-            task["progress_m"] = 0.0
         return task, 1.0
 ```
 
 and in `_handle`'s `recall` branch, at **both** the `EN_ROUTE` and
 `ARRIVED` cases — these are two separate code locations from `_advance`'s
 own `ARRIVED` branch above (that one fires on *guest-confirmed* collection;
-these fire on a *voice recall*), so the reset has to be added in both
-places independently, not inherited from one by the other:
+these fire on a *voice recall*):
 
 ```python
         elif phase == "EN_ROUTE":
             t["phase"] = "RECALLED"
             t["dispatched_at"] = time.time()
-            t["progress_m"] = 0.0
         elif phase == "ARRIVED":
             t["phase"] = "RETURNING"  # _drive_home closes the door on the way
-            t["progress_m"] = 0.0
 ```
 
-(`QUEUED`/`COLLECTING` → `AT_DESK` doesn't touch `progress_m` — the robot
-never left the desk, so there's no outbound progress to reset.)
+(`QUEUED`/`COLLECTING` → `AT_DESK` needed no `progress_m` handling even
+before this fix — the robot never left the desk.)
 
 - [ ] **Step 4: Door-open symmetry at `COLLECTING`**
 
@@ -1488,6 +1557,29 @@ the case this whole chain of fixes was for (distance-from-desk must
 actually decrease after a mid-route recall, not just the phase flag), and
 the corner self-check in Task 2 now asserts zero wall contacts directly
 via `data.contact`, not just a final-position proxy.
+
+**Fourth correction — found during Task 3's actual implementation, after
+Task 2 had already been reviewed and approved with the design above.**
+The `max(progress_m, measured_s)` floor that replaced dead-reckoning
+(previous paragraph) was itself flawed: correct for ordinary forward
+driving, but on the REVERSED path `_drive_home` feeds this same function
+for a recall/return trip, a robot already close to the reversed path's
+end legitimately needs `measured_s` to *decrease* for a number of ticks
+while it completes a real course-reversal U-turn (`sim.drive` always
+commands forward `v`, so reversing direction close to a target traces a
+wide loop, not an instant pivot) — the floor clamped that legitimate
+regression at its highest-ever value, permanently freezing the lookahead
+and preventing the robot from ever turning around. Found with real traced
+position/arc-length evidence, not guessed. Fixed by dropping the floor
+entirely: `new_progress_m` is now always exactly the fresh
+`_closest_arc_length` result, with no memory of past calls at all — which
+also retires the `0.0`-reset instruction from the previous paragraph as
+moot (see Task 3 Step 3: `progress_m` now has no computational effect on
+`pure_pursuit_step`, so resetting it anywhere is harmless but pointless).
+Task 2's self-check gained a fourth scenario for exactly this shape
+(partway along a path, then handed the same path reversed with the stale
+forward progress value carried through unreset) as a permanent regression
+test.
 
 **Type/shape consistency:** `nav.path_for`/`nav.total_length`/
 `nav.pure_pursuit_step`'s signatures are identical everywhere they're
