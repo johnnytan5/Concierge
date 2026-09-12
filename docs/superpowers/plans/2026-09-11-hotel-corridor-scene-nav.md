@@ -524,12 +524,25 @@ if __name__ == "__main__":
                 # The actual regression test for the dead-reckoning bug this
                 # task's design fix exists for: check for a real wall contact
                 # every tick, not just narrate it in a report. Direct
-                # data/model access (not pull_status()) is read-only and the
-                # same pattern used to originally diagnose this bug.
-                for i in range(sim.data.ncon):
-                    c = sim.data.contact[i]
-                    name1 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, c.geom1)
-                    name2 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, c.geom2)
+                # data/model access (not pull_status()) is read-only in
+                # intent, but `sim.data.ncon`/`sim.data.contact` are mutated
+                # by the background mj_step thread at every step (MuJoCo
+                # resizes the contact array per step, it is not a fixed-size
+                # buffer) -- reading them here without the sim's own lock is
+                # racy. Confirmed live: an unlocked version of this exact
+                # loop raised IndexError *inside* `sim.data.contact[i]`
+                # itself (not in mj_id2name) on a real run, reproducibly,
+                # because ncon can shrink between reading it and indexing.
+                # Snapshot the (geom1, geom2) pairs atomically under the
+                # sim's lock (the same lock pull_status() uses internally),
+                # then resolve names outside it -- mj_id2name only reads
+                # immutable model data, not step-mutated sim data, so it's
+                # safe unlocked.
+                with sim._lock:
+                    contact_pairs = [(c.geom1, c.geom2) for c in sim.data.contact[:sim.data.ncon]]
+                for g1, g2 in contact_pairs:
+                    name1 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, g1)
+                    name2 = mujoco.mj_id2name(sim.model, mujoco.mjtObj.mjOBJ_GEOM, g2)
                     if any(n and n.startswith("wall_") for n in (name1, name2)):
                         wall_hits.append((name1, name2))
                 if done:
