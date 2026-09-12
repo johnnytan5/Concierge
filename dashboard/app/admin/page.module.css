@@ -1,0 +1,282 @@
+/*
+ * Admin CRUD screen. Same tactical-telemetry substrate as the judge
+ * flow-diagram (dark, monospace, hard edges) -- this is the other
+ * judge/investor-facing screen, so it gets the same treatment.
+ * Tokens (--surface, --foreground, --fg-dim, --divider, --red, --green)
+ * come from dashboard/app/globals.css; nothing new declared here.
+ */
+
+/* ---------- Password gate ---------- */
+
+.gateWrap {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gateBox {
+  width: 100%;
+  max-width: 24rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  padding: 2.5rem clamp(1.5rem, 4vw, 2.5rem);
+}
+
+.gateTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+
+.gateDot {
+  width: 6px;
+  height: 6px;
+  background: var(--red);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
+}
+
+.gateTitle {
+  font-family: var(--font-geist-sans), sans-serif;
+  font-weight: 800;
+  font-size: clamp(2rem, 6vw, 2.75rem);
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  line-height: 0.9;
+  margin: 0;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 1.25rem;
+}
+
+.passwordInput {
+  width: 100%;
+  background: var(--background);
+  border: 1px solid var(--divider);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.85rem;
+  letter-spacing: 0.05em;
+  padding: 0.65rem 0.75rem;
+  box-sizing: border-box;
+}
+
+.passwordInput::placeholder {
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+
+.passwordInput:focus {
+  outline: none;
+  border-color: var(--red);
+}
+
+.unlockButton {
+  background: transparent;
+  border: 1px solid var(--divider);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.75rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: border-color 150ms linear, color 150ms linear;
+}
+
+/* Full-width only inside the password gate; the same class is reused
+   for the "Add" button in the add-item row, which must stay auto-width. */
+.gateBox .unlockButton {
+  width: 100%;
+}
+
+.unlockButton:hover,
+.unlockButton:focus-visible {
+  border-color: var(--red);
+  color: var(--red);
+  outline: none;
+}
+
+/* ---------- Inventory table ---------- */
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--divider);
+  margin-bottom: 2.5rem;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.8rem;
+}
+
+.table thead th {
+  text-align: left;
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--divider);
+  font-size: 0.65rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.table tbody td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--divider);
+  vertical-align: middle;
+  color: var(--foreground);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.priceInput,
+.stockInput {
+  background: var(--background);
+  border: 1px solid var(--divider);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.8rem;
+  text-align: right;
+  padding: 0.3rem 0.45rem;
+  box-sizing: border-box;
+}
+
+.priceInput {
+  width: 5.5rem;
+}
+
+.stockInput {
+  width: 4.5rem;
+}
+
+.priceInput:focus,
+.stockInput:focus {
+  outline: none;
+  border-color: var(--red);
+}
+
+/* Available is the nominal, unremarkable state -- no accent color, per
+   the house rule that color signals attention, not routine status.
+   Unavailable is the state worth flagging, so it gets the alert red. */
+.availButton {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--divider);
+  padding: 0.3rem 0.65rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 150ms linear, color 150ms linear;
+}
+
+.available {
+  color: var(--fg-dim);
+}
+
+.available:hover {
+  color: var(--foreground);
+  border-color: var(--foreground);
+}
+
+.unavailable {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.deleteButton {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: transparent;
+  border: 1px solid var(--divider);
+  color: var(--fg-dim);
+  padding: 0.3rem 0.65rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 150ms linear, color 150ms linear;
+}
+
+.deleteButton:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* ---------- Add item ---------- */
+
+.addSection {
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  padding: 1.5rem 1.75rem 1.75rem;
+}
+
+.addTitle {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin: 0 0 1rem;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 0.65rem;
+}
+
+.addRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.textInput,
+.select {
+  background: var(--background);
+  border: 1px solid var(--divider);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.8rem;
+  padding: 0.5rem 0.65rem;
+  box-sizing: border-box;
+}
+
+.textInput {
+  flex: 1 1 10rem;
+  min-width: 8rem;
+}
+
+.textInput::placeholder {
+  color: var(--fg-dim);
+}
+
+.select {
+  flex: 0 0 auto;
+}
+
+.textInput:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--red);
+}
+
+@media (max-width: 640px) {
+  .addRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
