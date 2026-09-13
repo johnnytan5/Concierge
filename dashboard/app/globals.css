@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+/*
+ * Tactical-telemetry theme tokens. Dark-mode exclusive by design (per the
+ * industrial-brutalist-ui skill) -- this is a judge-facing ops/telemetry
+ * screen, not a document that should respect a light system preference.
+ */
+:root {
+  --background: #0a0a0a;
+  --foreground: #eaeaea;
+  --fg-dim: #6b6b6b;
+  --surface: #131313;
+  --divider: #2a2a2a;
+  --red: #ff2a2a;
+  --green: #4af626;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  position: relative;
+}
+
+/* Faint fixed scanline texture across the whole app -- simulated CRT
+   sweep, kept low-opacity so it reads as grain, not noise. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 999;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.025),
+    rgba(255, 255, 255, 0.025) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* Page shell (dashboard/app/page.tsx) */
+.pageMain {
+  padding: 2.5rem clamp(1rem, 4vw, 3rem);
+  max-width: 76rem;
+  margin: 0 auto;
+}
+
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--divider);
+  padding-bottom: 1.25rem;
+  margin-bottom: 2rem;
+}
+
+.pageTag {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.2em;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+
+.pageTitle {
+  font-family: var(--font-geist-sans), sans-serif;
+  font-weight: 800;
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
+  letter-spacing: -0.02em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.pageStatus {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.15em;
+  color: var(--green);
+  text-transform: uppercase;
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  background: var(--green);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 30%, transparent);
+  animation: statusBlink 1.6s steps(2, jump-none) infinite;
+}
+
+@keyframes statusBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}

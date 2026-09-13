@@ -18,3 +18,8 @@ pandas
 
 # Audio test tooling (RQ1/RQ2)
 # sounddevice already listed above (orchestrator uses it too, for mic/speaker I/O)
+
+# Admin API (4th process — admin_api/)
+fastapi
+uvicorn
+supabase
