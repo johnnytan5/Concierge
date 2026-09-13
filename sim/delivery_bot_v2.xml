@@ -228,6 +228,60 @@
       </body>
 
       <site name="base_imu" pos="0 0 0" size="0.01"/>
+
+      <!-- Demo-recording cameras (Days 8-14 corridor work). "chase"
+           follows from behind/beside for the corridor drive, "lid"
+           frames close on the door mechanism (local y=-0.17, the -y side
+           where lid_top/lid_bottom sit) so it stays correctly framed at
+           both open moments (desk, room) without retargeting.
+
+           Two corrections vs. the brief's starting values, both found by
+           actually rendering and looking (per Task 1 Step 4), not by
+           inspection alone:
+
+           1) mode="fixed" (rigid attachment: rotates AND translates with
+              this body), not the brief's original mode="track". Verified
+              empirically that "track" keeps the camera's pos offset and
+              orientation FIXED IN THE WORLD FRAME -- only translating
+              with the body, never rotating with it (confirmed via
+              data.cam_xpos: the exact same world-frame offset before and
+              after a 90-degree body rotation). Fine at the robot's
+              initial yaw=0 heading, but after the junction turn "lid"
+              ends up looking at the robot's rear and "chase" ends up
+              staring into the tower's flat side -- the opposite of
+              "stays correctly framed... without retargeting" once "room"
+              means a far-arm room reached after turning. mode="fixed"
+              rotates the same pos/xyaxes offset with the body (confirmed:
+              offset (-0.8,0.5,0.6) at yaw=90 becomes world offset
+              (-0.5,-0.8,0.6), correctly re-oriented rather than left
+              pointing the old way), so the same numeric values stay
+              correct at any heading.
+
+           2) Both cameras' lateral (local-y) offset magnitudes shrunk:
+              chase from 0.5 to 0.15, lid from -0.7 to -0.25. Local y is
+              the robot's width axis, and -- for a robot driving down a
+              corridor whose walls are only +-0.3m from centerline --
+              local y is also the corridor's width-constrained axis at
+              every heading (mode="fixed" keeps that relationship
+              constant). The original 0.5/0.7 magnitudes put both cameras
+              outside the walls the instant the robot left the open desk
+              staging area (x<-0.1, the only unwalled stretch), so they
+              rendered nothing but the wall's near face in extreme close-
+              up (chase) or, worse, solid black (lid). lid's new pos also
+              fixes a second, independent bug: its original xyaxes
+              ("-1 0 0  0 0.3 0.95") pointed the view direction at
+              local (0,-0.95,0.3) -- AWAY from the body (the camera sits
+              at y=-0.25, the door face is at y=-0.17, i.e. *closer* to
+              the body, so the camera must look toward +y, not further
+              -y). Flipping the x-axis sign to "1 0 0  0 0.3 0.95" flips
+              the view direction to (0,+0.95,-0.3): toward the door face
+              and slightly down from above it. Confirmed by rendering:
+              the original produced a black frame (camera looking into
+              empty space past the door) at every heading, including the
+              robot's own spawn pose where nothing else about the scene
+              could explain a black frame. -->
+      <camera name="chase" mode="fixed" pos="-0.8 0.15 0.55" xyaxes="-0.5 -0.87 0  0.3 -0.17 0.94"/>
+      <camera name="lid" mode="fixed" pos="0 -0.27 0.22" xyaxes="1 0 0  0 0.3 0.95" fovy="100"/>
     </body>
   </worldbody>
 
