@@ -9,7 +9,8 @@ import uuid
 from collections import Counter
 
 from orchestrator import inventory
-from task_engine.engine import BASE_ETA_SECONDS
+from task_engine import nav
+from task_engine.engine import eta_seconds_for
 
 # Engine phase -> what a front-desk worker would call it. Mirrors the
 # dashboard's own PHASE_HUMAN (dashboard/lib/format.ts); keep them in step.
@@ -71,11 +72,14 @@ def _summarize(name: str, a: dict, r) -> str:
     if not isinstance(r, dict):
         return f"{name} completed."
 
-    if "error" in r:
+    if "error" in r and name != "dispatch_delivery":
         return f"Couldn't do that: {r['error']}."
 
     if name == "dispatch_delivery":
         room = a.get("room", "?")
+        if r.get("error") == "unknown_room":
+            rooms = ", ".join(r.get("deliverable_rooms") or [])
+            return f"No route to room {room} — the robot can only reach {rooms}."
         missing = r.get("unavailable_items") or []
         missing_txt = ", ".join(str(m.get("name")) for m in missing)
         if not r.get("task_id"):
@@ -249,6 +253,16 @@ class ToolHandlers:
         return inventory.all_items()
 
     def dispatch_delivery(self, room, items, priority="normal"):
+        # Every room used to be the same fixed distance from the desk, so any
+        # room string "worked". Now a delivery follows that room's own
+        # hand-authored waypoint path, and there is no pathfinding — a room
+        # with no path cannot be reached at all. Check before touching stock:
+        # otherwise an undeliverable order would still decrement inventory.
+        if room not in nav.known_rooms():
+            return {"task_id": None, "dispatched_items": [], "unavailable_items": [],
+                    "error": "unknown_room",
+                    "deliverable_rooms": nav.known_rooms()}
+
         looked_up = inventory.lookup_items(items)
         dispatched = [i for i in looked_up if i["available"] and i["in_stock"]]
         unavailable = [
@@ -269,7 +283,9 @@ class ToolHandlers:
         inventory.insert_delivery({"task_id": task_id, "room": room, "items": item_names,
                                     "phase": "QUEUED", "priority": priority})
 
-        return {"task_id": task_id, "eta_seconds": BASE_ETA_SECONDS,
+        # Per-room estimate from that room's real path length — the far wing
+        # is genuinely farther than the near one.
+        return {"task_id": task_id, "eta_seconds": eta_seconds_for(room),
                 "dispatched_items": dispatched, "unavailable_items": unavailable}
 
     def _newest_for_room(self, room):
@@ -429,6 +445,23 @@ if __name__ == "__main__":
         assert all_unavailable["task_id"] is None
         assert len(q.items) == 1, "no dispatch command should be enqueued for zero valid items"
 
+        # A room with no waypoint path cannot be reached at all. Rejected
+        # BEFORE stock is touched -- an undeliverable order must not decrement
+        # inventory. (Before the corridor scene every room was the same fixed
+        # distance from the desk, so any string "worked".)
+        no_route = h.dispatch("dispatch_delivery",
+                               {"room": "9999", "items": ["towel"]})
+        assert no_route["task_id"] is None, no_route
+        assert no_route["error"] == "unknown_room", no_route
+        assert "1204" in no_route["deliverable_rooms"], no_route
+        assert len(q.items) == 1, "no dispatch command for an unreachable room"
+
+        # ETA is per-room now: the far wing is genuinely farther than the near
+        # one, which is the whole reason the corridor is L-shaped.
+        near = h.dispatch("dispatch_delivery", {"room": "0803", "items": ["towel"]})
+        far = h.dispatch("dispatch_delivery", {"room": "1205", "items": ["towel"]})
+        assert far["eta_seconds"] > near["eta_seconds"], (near["eta_seconds"], far["eta_seconds"])
+
         tid = result["task_id"]
         state["tasks"][tid] = {"task_id": tid, "room": "1204", "phase": "EN_ROUTE",
                                 "dispatched_at": time.time(), "eta_seconds": 90.0}
@@ -479,7 +512,12 @@ if __name__ == "__main__":
         unknown = h.dispatch("not_a_real_tool", {})
         assert "error" in unknown
 
-        assert logged_events == ["check_menu", "dispatch_delivery", "dispatch_delivery",
+        assert logged_events == ["check_menu",
+                                   "dispatch_delivery",   # towel + toothbrush
+                                   "dispatch_delivery",   # all unavailable
+                                   "dispatch_delivery",   # unknown room
+                                   "dispatch_delivery",   # near wing
+                                   "dispatch_delivery",   # far wing
                                    "check_delivery_status", "check_delivery_status",
                                    "announce_arrival", "announce_arrival", "get_fleet_state",
                                    "recall_robot", "recall_robot", "recall_robot",
