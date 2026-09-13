@@ -9,7 +9,9 @@ slow Supabase response can never block the event loop.
 """
 import asyncio
 import os
+import uuid
 from collections import Counter
+from datetime import datetime, timezone
 
 from supabase import create_client, Client
 
@@ -131,7 +133,8 @@ def insert_delivery(task: dict):
             "phase": task["phase"],
             "priority": task["priority"],
         }).execute()
-    asyncio.get_running_loop().run_in_executor(None, _do)
+    # returns the Future so a test can await it; production ignores it
+    return asyncio.get_running_loop().run_in_executor(None, _do)
 
 
 def insert_escalation(reason: str, room: str | None):
@@ -139,16 +142,67 @@ def insert_escalation(reason: str, room: str | None):
         _get_client().table("frontdesk_escalations").insert(
             {"reason": reason, "room": room}
         ).execute()
-    asyncio.get_running_loop().run_in_executor(None, _do)
+    # returns the Future so a test can await it; production ignores it
+    return asyncio.get_running_loop().run_in_executor(None, _do)
 
 
-def insert_tool_call_event(tool_name: str, arguments: dict, result_summary: str):
+def insert_voice_session(session_id: str, agent_id: str | None = None):
+    """BLOCKING on purpose, and the only write in this module that is.
+
+    tool_call_events.session_id and transcript_turns.session_id are both
+    real FKs onto this row, so it has to land before the first tool call
+    or transcript turn of the session -- all of which go out
+    fire-and-forget through the thread pool with nobody awaiting their
+    result. Called once at startup, before the WS event loop begins, so
+    the cost is paid where nothing is waiting on it. Let it raise: a
+    session that cannot register is a session with no audit trail, and
+    that should be loud at startup rather than silent for the whole call.
+    """
+    _get_client().table("voice_sessions").insert(
+        {"id": session_id, "agent_id": agent_id}
+    ).execute()
+
+
+def end_voice_session(session_id: str):
+    """Best-effort close-out. A missing ended_at just renders the call as
+    still open in the dashboard, which is not worth crashing a shutdown
+    path over."""
+    try:
+        _get_client().table("voice_sessions").update(
+            {"ended_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", session_id).execute()
+    except Exception as e:
+        print(f"[inventory] could not close voice session {session_id}: {e!r}")
+
+
+def insert_transcript_turn(session_id: str, role: str, text: str):
+    """One row per transcript.user / transcript.agent event. Fire-and-forget
+    like every other write here -- CLAUDE.md constraint 2 covers the whole
+    event loop, not just tool handlers, and a transcript row is never on
+    any critical path."""
+    def _do():
+        _get_client().table("transcript_turns").insert({
+            "session_id": session_id, "role": role, "text": text,
+        }).execute()
+    # returns the Future so a test can await it; production ignores it
+    return asyncio.get_running_loop().run_in_executor(None, _do)
+
+
+def insert_tool_call_event(tool_name: str, arguments: dict, result_summary: str,
+                            session_id: str | None = None, result=None):
+    """`result_summary` is one plain sentence (see tools.summarize_result) for
+    the dashboard's staff view; `result` is the handler's structured return,
+    stored as jsonb for dev view. Storing only str(result) in the summary
+    column, as this once did, left a Python repr on a staff-facing screen."""
     def _do():
         _get_client().table("tool_call_events").insert({
             "tool_name": tool_name, "arguments": arguments,
+            "session_id": session_id,
+            "result": result,
             "result_summary": result_summary[:500],
         }).execute()
-    asyncio.get_running_loop().run_in_executor(None, _do)
+    # returns the Future so a test can await it; production ignores it
+    return asyncio.get_running_loop().run_in_executor(None, _do)
 
 
 if __name__ == "__main__":
@@ -195,6 +249,52 @@ if __name__ == "__main__":
             if audit_id:
                 _get_client().table("inventory_audit_log").delete().eq("id", audit_id).execute()
 
+    async def _voice_session_roundtrip():
+        """The Call log's whole premise: that tool calls and transcript turns
+        written during one WS session can be grouped back into one
+        conversation afterwards. Proves the session row, both child writes,
+        the FK, and the grouping read -- live, then cleans up after itself."""
+        session_id = "sess_selfcheck_" + uuid.uuid4().hex[:8]
+        client = _get_client()
+
+        insert_voice_session(session_id, agent_id="selfcheck-agent")
+        try:
+            row = (client.table("voice_sessions").select("*")
+                   .eq("id", session_id).execute().data[0])
+            assert row["agent_id"] == "selfcheck-agent", row
+            assert row["started_at"] and row["ended_at"] is None, row
+
+            # children reference the session; awaited here, fire-and-forget live
+            await insert_transcript_turn(session_id, "guest", "two towels to 1204 please")
+            await insert_transcript_turn(session_id, "agent", "Sending two towels up now.")
+            await insert_tool_call_event(
+                "dispatch_delivery", {"room": "1204", "items": ["towel", "towel"]},
+                "{'task_id': 'selfchk1'}", session_id=session_id)
+
+            turns = (client.table("transcript_turns").select("*")
+                     .eq("session_id", session_id).order("created_at").execute().data)
+            assert [t["role"] for t in turns] == ["guest", "agent"], turns
+            assert turns[0]["text"].startswith("two towels"), turns
+
+            calls = (client.table("tool_call_events").select("*")
+                     .eq("session_id", session_id).execute().data)
+            assert len(calls) == 1 and calls[0]["tool_name"] == "dispatch_delivery", calls
+            # arguments must survive the round trip as real jsonb, not a string
+            assert calls[0]["arguments"]["items"] == ["towel", "towel"], calls[0]
+
+            end_voice_session(session_id)
+            closed = (client.table("voice_sessions").select("ended_at")
+                      .eq("id", session_id).execute().data[0])
+            assert closed["ended_at"], closed
+            print(f"voice-session round trip OK ({len(turns)} turns, {len(calls)} tool call, "
+                  "grouped by session_id)")
+        finally:
+            # tool_call_events.session_id is ON DELETE SET NULL, so that row
+            # outlives the session and has to go explicitly; transcript_turns
+            # is ON DELETE CASCADE and goes with it.
+            client.table("tool_call_events").delete().eq("session_id", session_id).execute()
+            client.table("voice_sessions").delete().eq("id", session_id).execute()
+
     def demo():
         refresh_cache_sync()
         print(f"cache loaded: {len(_cache)} items")
@@ -205,6 +305,7 @@ if __name__ == "__main__":
         print("unknown-item lookup OK")
 
         asyncio.run(_duplicate_decrement_roundtrip())
+        asyncio.run(_voice_session_roundtrip())
 
         print("inventory self-check OK (schema + cache read confirmed live)")
 

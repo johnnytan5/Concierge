@@ -6,9 +6,130 @@ shared `state` dict, and returns immediately — never waits on the robot
 """
 import time
 import uuid
+from collections import Counter
 
 from orchestrator import inventory
-from task_engine.engine import BASE_ETA_SECONDS
+from task_engine import nav
+from task_engine.engine import eta_seconds_for
+
+# Engine phase -> what a front-desk worker would call it. Mirrors the
+# dashboard's own PHASE_HUMAN (dashboard/lib/format.ts); keep them in step.
+_PHASE_WORDS = {
+    "QUEUED": "waiting for a robot",
+    "COLLECTING": "being loaded",
+    "EN_ROUTE": "on the way",
+    "ARRIVED": "at the door",
+    "RETURNING": "heading back",
+    "RECALLED": "recalled",
+    "AT_DESK": "back at the desk",
+    "DONE": "delivered",
+}
+
+
+def _qty(items) -> str:
+    """['towel','towel'] -> '2x towel'. Duplicates ARE the quantity — that is
+    the shape dispatch_delivery receives from the model."""
+    if not items:
+        return "nothing"
+    counts = Counter(str(i) for i in items)
+    return ", ".join(f"{n}× {name}" for name, n in counts.items())
+
+
+def summarize_result(name: str, arguments: dict, result) -> str:
+    """One plain sentence describing what the tool actually did.
+
+    This is what lands in tool_call_events.result_summary and what the admin
+    dashboard shows a front-desk worker. The structured return is stored
+    separately in `result` (jsonb) for dev view, so nothing is lost — before
+    this, the column held Python's str(dict) of the return value and the
+    staff-facing screen rendered a raw repr.
+
+    Never raises: a summary is a nice-to-have on an audit row, and a
+    formatting slip must not take down a tool call that already succeeded.
+    """
+    try:
+        return _summarize(name, arguments or {}, result)
+    except Exception:  # noqa: BLE001 - deliberately total
+        return f"{name} completed."
+
+
+def _summarize(name: str, a: dict, r) -> str:
+    # check_menu returns a LIST of items, not a dict — handled before the
+    # dict guard below, which it would otherwise fall straight through.
+    if name == "check_menu":
+        items = r if isinstance(r, list) else []
+        if len(items) == 1:
+            it = items[0]
+            price = it.get("price")
+            bits = [f"${float(price):.2f}"] if price else []
+            bits.append("available" if it.get("available") and it.get("in_stock")
+                        else "not available")
+            if it.get("dietary_tags"):
+                bits.append(", ".join(str(t) for t in it["dietary_tags"]))
+            return f"{it.get('name', 'Item')} — {', '.join(bits)}."
+        return f"Checked the menu: {len(items)} item(s)."
+
+    if not isinstance(r, dict):
+        return f"{name} completed."
+
+    if "error" in r and name != "dispatch_delivery":
+        return f"Couldn't do that: {r['error']}."
+
+    if name == "dispatch_delivery":
+        room = a.get("room", "?")
+        if r.get("error") == "unknown_room":
+            rooms = ", ".join(r.get("deliverable_rooms") or [])
+            return f"No route to room {room} — the robot can only reach {rooms}."
+        missing = r.get("unavailable_items") or []
+        missing_txt = ", ".join(str(m.get("name")) for m in missing)
+        if not r.get("task_id"):
+            return f"Nothing sent to room {room} — {missing_txt or 'no items available'} not available."
+        sent = _qty([i.get("name") for i in (r.get("dispatched_items") or [])])
+        line = f"Sent {sent} to room {room}."
+        if missing:
+            line += f" Couldn't send {missing_txt}."
+        return line
+
+    if name == "check_delivery_status":
+        if r.get("error"):
+            return "No matching order found."
+        phase = _PHASE_WORDS.get(r.get("phase"), str(r.get("phase", "")).lower())
+        eta = r.get("eta_seconds")
+        tail = f", about {round(eta / 60)} min away" if isinstance(eta, (int, float)) and eta > 0 else ""
+        return f"Order is {phase}{tail}."
+
+    if name == "amend_delivery":
+        bits = []
+        if a.get("add"):
+            bits.append(f"added {_qty(a['add'])}")
+        if a.get("remove"):
+            bits.append(f"removed {_qty(a['remove'])}")
+        if a.get("new_room"):
+            bits.append(f"moved to room {a['new_room']}")
+        return "Changed the order: " + (", ".join(bits) if bits else "no changes") + "."
+
+    if name == "recall_robot":
+        if not r.get("ack"):
+            reason = str(r.get("reason", "")).replace("_", " ")
+            return f"Couldn't recall the robot — {reason or 'not possible'}."
+        return "Robot called back to the desk."
+
+    if name == "get_fleet_state":
+        robots = r.get("robots") or []
+        busy = sum(1 for x in robots if x.get("current_task_id"))
+        return f"Checked the fleet: {busy} of {len(robots)} robot(s) busy."
+
+    if name == "announce_arrival":
+        if not r.get("ack"):
+            return "Nothing to announce for that room."
+        return f"Announced arrival at room {a.get('room', '?')}."
+
+    if name == "escalate_to_frontdesk":
+        room = a.get("room")
+        where = f" from room {room}" if room else ""
+        return f"Passed to the front desk{where}: {a.get('reason', '')}."
+
+    return f"{name} completed."
 
 # Flat schema per AssemblyAI Voice Agent API (session.tools) — NOT OpenAI's
 # nested {"type":"function","function":{...}} form.
@@ -102,6 +223,7 @@ SESSION_TOOLS = [
             "type": "object",
             "properties": {
                 "reason": {"type": "string", "description": "What the guest needs, in plain language."},
+                "room": {"type": "string", "description": "Room number the guest is calling from, if they gave one."},
             },
             "required": ["reason"],
         },
@@ -111,11 +233,19 @@ SESSION_TOOLS = [
 
 class ToolHandlers:
     """Bound to one task_engine cmd_queue + shared state dict for the life
-    of a voice session."""
+    of a voice session.
 
-    def __init__(self, cmd_queue, state):
+    `session_id` is the voice_sessions row for this call; every tool call
+    is stamped with it so the admin dashboard's Call log can group a
+    conversation's tool calls (and its transcript turns) back together.
+    Defaults to None so the offline self-check below, and any other
+    caller that isn't a real WS session, still works unchanged.
+    """
+
+    def __init__(self, cmd_queue, state, session_id=None):
         self._q = cmd_queue
         self._state = state
+        self._session_id = session_id
 
     def check_menu(self, items=None):
         if items:
@@ -123,6 +253,16 @@ class ToolHandlers:
         return inventory.all_items()
 
     def dispatch_delivery(self, room, items, priority="normal"):
+        # Every room used to be the same fixed distance from the desk, so any
+        # room string "worked". Now a delivery follows that room's own
+        # hand-authored waypoint path, and there is no pathfinding — a room
+        # with no path cannot be reached at all. Check before touching stock:
+        # otherwise an undeliverable order would still decrement inventory.
+        if room not in nav.known_rooms():
+            return {"task_id": None, "dispatched_items": [], "unavailable_items": [],
+                    "error": "unknown_room",
+                    "deliverable_rooms": nav.known_rooms()}
+
         looked_up = inventory.lookup_items(items)
         dispatched = [i for i in looked_up if i["available"] and i["in_stock"]]
         unavailable = [
@@ -143,7 +283,9 @@ class ToolHandlers:
         inventory.insert_delivery({"task_id": task_id, "room": room, "items": item_names,
                                     "phase": "QUEUED", "priority": priority})
 
-        return {"task_id": task_id, "eta_seconds": BASE_ETA_SECONDS,
+        # Per-room estimate from that room's real path length — the far wing
+        # is genuinely farther than the near one.
+        return {"task_id": task_id, "eta_seconds": eta_seconds_for(room),
                 "dispatched_items": dispatched, "unavailable_items": unavailable}
 
     def _newest_for_room(self, room):
@@ -216,9 +358,14 @@ class ToolHandlers:
         self._q.put({"cmd": "announce", "task_id": t["task_id"]})
         return {"ack": True, "task_id": t["task_id"]}
 
-    def escalate_to_frontdesk(self, reason):
-        inventory.insert_escalation(reason, None)
-        return {"ack": True}
+    def escalate_to_frontdesk(self, reason, room=None):
+        # `room` was hardcoded None here until the admin dashboard needed
+        # it: the Escalations tab leads each row with the room number, so
+        # every escalation rendered against a blank. The tool now asks the
+        # model for it, and it stays optional -- plenty of escalations
+        # ("the lobby wifi is down") legitimately have no room.
+        inventory.insert_escalation(reason, room)
+        return {"ack": True, "room": room}
 
     def dispatch(self, name, arguments):
         """Look up and call a handler by the tool name the agent sent in tool.call."""
@@ -227,7 +374,11 @@ class ToolHandlers:
             result = {"error": f"unknown_tool:{name}"}
         else:
             result = fn(**arguments)
-        inventory.insert_tool_call_event(name, arguments, str(result))
+        # A readable sentence for the dashboard's staff view, plus the
+        # structured return for dev view — not str(result) for both.
+        inventory.insert_tool_call_event(
+            name, arguments, summarize_result(name, arguments, result),
+            session_id=self._session_id, result=result)
         return result
 
 
@@ -244,7 +395,7 @@ if __name__ == "__main__":
         q = _FakeQueue()
         state = {"tasks": {}, "robots": {"robot_1": {"phase": "IDLE", "pose_frac": 0.0,
                                                         "current_task": None, "battery": 100.0}}}
-        h = ToolHandlers(q, state)
+        h = ToolHandlers(q, state, session_id="sess_selfcheck")
 
         # fake inventory cache directly, no live Supabase needed for this check
         inventory._cache = {
@@ -262,10 +413,21 @@ if __name__ == "__main__":
         # asyncio.run() wrapper just for this. Same offline-check philosophy
         # as the fake inventory cache above: no live Supabase needed here.
         logged_events = []
-        inventory.insert_tool_call_event = lambda name, args, summary: logged_events.append(name)
+        logged_sessions = []
+        logged_summaries = []
+        logged_results = []
+        escalations = []
+
+        def _fake_tool_event(name, args, summary, session_id=None, result=None):
+            logged_events.append(name)
+            logged_sessions.append(session_id)
+            logged_summaries.append(summary)
+            logged_results.append(result)
+
+        inventory.insert_tool_call_event = _fake_tool_event
         inventory.decrement_stock = lambda item_names, task_id=None, source="dispatch_delivery": None
         inventory.insert_delivery = lambda task: None
-        inventory.insert_escalation = lambda reason, room: None
+        inventory.insert_escalation = lambda reason, room: escalations.append((reason, room))
 
         menu = h.dispatch("check_menu", {"items": ["nasi lemak"]})
         assert menu[0]["price"] == 8.0 and "halal" in menu[0]["dietary_tags"]
@@ -282,6 +444,23 @@ if __name__ == "__main__":
                                        {"room": "1204", "items": ["toothbrush"]})
         assert all_unavailable["task_id"] is None
         assert len(q.items) == 1, "no dispatch command should be enqueued for zero valid items"
+
+        # A room with no waypoint path cannot be reached at all. Rejected
+        # BEFORE stock is touched -- an undeliverable order must not decrement
+        # inventory. (Before the corridor scene every room was the same fixed
+        # distance from the desk, so any string "worked".)
+        no_route = h.dispatch("dispatch_delivery",
+                               {"room": "9999", "items": ["towel"]})
+        assert no_route["task_id"] is None, no_route
+        assert no_route["error"] == "unknown_room", no_route
+        assert "1204" in no_route["deliverable_rooms"], no_route
+        assert len(q.items) == 1, "no dispatch command for an unreachable room"
+
+        # ETA is per-room now: the far wing is genuinely farther than the near
+        # one, which is the whole reason the corridor is L-shaped.
+        near = h.dispatch("dispatch_delivery", {"room": "0803", "items": ["towel"]})
+        far = h.dispatch("dispatch_delivery", {"room": "1205", "items": ["towel"]})
+        assert far["eta_seconds"] > near["eta_seconds"], (near["eta_seconds"], far["eta_seconds"])
 
         tid = result["task_id"]
         state["tasks"][tid] = {"task_id": tid, "room": "1204", "phase": "EN_ROUTE",
@@ -318,17 +497,72 @@ if __name__ == "__main__":
         assert ack == {"ack": True, "phase": "EN_ROUTE"}, ack
         assert q.items[-1]["cmd"] == "recall"
 
+        # escalation without a room still works -- plenty of them have none
         esc = h.dispatch("escalate_to_frontdesk", {"reason": "late checkout"})
-        assert esc == {"ack": True}
+        assert esc == {"ack": True, "room": None}, esc
+        assert escalations[-1] == ("late checkout", None), escalations
+
+        # ...and when the guest gives one it must actually reach the row,
+        # instead of the hardcoded None the dashboard used to render blank
+        esc_room = h.dispatch("escalate_to_frontdesk",
+                                {"reason": "aircon broken", "room": "1204"})
+        assert esc_room == {"ack": True, "room": "1204"}, esc_room
+        assert escalations[-1] == ("aircon broken", "1204"), escalations
 
         unknown = h.dispatch("not_a_real_tool", {})
         assert "error" in unknown
 
-        assert logged_events == ["check_menu", "dispatch_delivery", "dispatch_delivery",
+        assert logged_events == ["check_menu",
+                                   "dispatch_delivery",   # towel + toothbrush
+                                   "dispatch_delivery",   # all unavailable
+                                   "dispatch_delivery",   # unknown room
+                                   "dispatch_delivery",   # near wing
+                                   "dispatch_delivery",   # far wing
                                    "check_delivery_status", "check_delivery_status",
                                    "announce_arrival", "announce_arrival", "get_fleet_state",
                                    "recall_robot", "recall_robot", "recall_robot",
-                                   "escalate_to_frontdesk", "not_a_real_tool"], logged_events
+                                   "escalate_to_frontdesk", "escalate_to_frontdesk",
+                                   "not_a_real_tool"], logged_events
+
+        # every tool call must carry the session stamp the Call log groups on
+        assert set(logged_sessions) == {"sess_selfcheck"}, logged_sessions
+
+        # Nothing a front-desk worker reads may be a Python repr. This is the
+        # regression that put {'task_id': ..., 'dispatched_items': [{...}]} on
+        # a staff-facing screen.
+        for summary in logged_summaries:
+            assert not summary.startswith(("{", "[")), summary
+            assert "'" not in summary or "Couldn't" in summary or "can't" in summary, summary
+            assert summary.endswith("."), summary
+        # ...while the structured return is still captured, for dev view
+        assert any(isinstance(r, dict) and "task_id" in r for r in logged_results), logged_results
+
+        # spot-check the wording of the two that matter most
+        sent = next(s for s, n in zip(logged_summaries, logged_events)
+                    if n == "dispatch_delivery")
+        assert sent == "Sent 1× towel to room 1204. Couldn't send toothbrush.", sent
+        esc = [s for s, n in zip(logged_summaries, logged_events)
+               if n == "escalate_to_frontdesk"]
+        assert esc[-1] == "Passed to the front desk from room 1204: aircon broken.", esc[-1]
+
+        # quantities collapse the way the transcript reads them
+        assert _qty(["towel", "towel", "nasi lemak"]) == "2× towel, 1× nasi lemak"
+        assert _qty([]) == "nothing"
+
+        # check_menu returns a LIST, not a dict -- it fell through the dict
+        # guard and summarized as "check_menu completed." until this was caught
+        one = summarize_result("check_menu", {"items": ["nasi lemak"]},
+                                [{"name": "nasi lemak", "price": 8.0, "available": True,
+                                  "in_stock": True, "dietary_tags": ["halal"]}])
+        assert one == "nasi lemak — $8.00, available, halal.", one
+        many = summarize_result("check_menu", {}, [{"name": "a"}, {"name": "b"}])
+        assert many == "Checked the menu: 2 item(s).", many
+
+        # a handler that returned something unexpected must still summarize
+        assert summarize_result("dispatch_delivery", {"room": "1"}, None) \
+            == "dispatch_delivery completed."
+        assert summarize_result("not_a_tool", {}, {"error": "unknown_tool:x"}) \
+            == "Couldn't do that: unknown_tool:x."
 
         print("tools self-check OK")
 

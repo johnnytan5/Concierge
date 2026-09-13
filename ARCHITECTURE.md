@@ -283,10 +283,13 @@ hotel-voice-robot/
 ├── .env.example
 ├── requirements.txt
 ├── orchestrator/          # Process 1 — WebSocket + tool handlers
-│   ├── agent.py           # session config, mic/speaker I/O, tool.call loop
-│   └── tools.py           # 6-tool schema + handlers (task_engine cmd_queue + shared state)
+│   ├── agent.py           # session config, mic/speaker I/O, tool.call loop,
+│   │                      #   voice_sessions + transcript_turns persistence
+│   ├── tools.py           # 8-tool schema + handlers (task_engine cmd_queue + shared state)
+│   └── inventory.py       # local menu cache + fire-and-forget Supabase writes
 ├── task_engine/           # Process 2 — task FSM + navigation
 │   ├── engine.py          # task FSM, shared-state contract for orchestrator reads
+│   ├── supabase_sync.py   # command polling + robot/delivery mirroring
 │   ├── nav.py             # waypoint graph + pure pursuit — pending, Day 8-14
 │   └── waypoints.json     # pending, Day 8-14
 ├── sim/                   # Process 3 — MuJoCo
@@ -295,9 +298,41 @@ hotel-voice-robot/
 │   ├── run_headless.py       # dev: drive/turn/door smoke test, no window
 │   ├── run_viewer.py         # demo: same, with the interactive viewer
 │   └── scene_corridor.xml    # hotel corridor + waypoint doors — pending, Day 8-14
+├── admin_api/             # Process 4 — FastAPI, the only write path for the UI
+│   └── main.py            # item CRUD, robot recall, escalation resolve/reopen
+├── dashboard/             # Next.js 16 admin surface — see dashboard/README.md
+│   ├── app/               # layout + the single page that mounts RobotAdmin
+│   ├── components/        # RobotAdmin (5 tabs), CallFlow (per-call replay)
+│   └── lib/               # types, formatting, realtime hooks, write client
+├── supabase/migrations/   # the literal applied SQL, not reconstructions
 ├── audio_tests/           # RQ1/RQ2 test sets + results
 │   ├── scripts/           # utterances to record
 │   ├── recordings/
 │   └── results.md
 └── demo/                  # recorded clips for submission
 ```
+
+## Database
+
+Supabase project `hcutwuwlzuspbitllhlw`. All tables RLS-enabled with
+select-only policies for `anon`/`authenticated`; every write goes through a
+service-role client held by `orchestrator`, `task_engine` or `admin_api`.
+Schema lives in `supabase/migrations/`.
+
+| Table | Written by | Read by |
+|---|---|---|
+| `inventory_items` | admin_api (CRUD), orchestrator (stock decrement) | orchestrator cache, dashboard |
+| `inventory_audit_log` | orchestrator (`decrement_stock`) | dashboard stock ledger |
+| `robots` | task_engine (mirror ~1 Hz) | dashboard Fleet |
+| `deliveries` | orchestrator (insert), task_engine (mirror) | dashboard Deliveries/Fleet |
+| `robot_commands` | admin_api (`complete_loading` / `complete_collection` / `recall`) | task_engine poll |
+| `frontdesk_escalations` | orchestrator (raise), admin_api (resolve/reopen) | dashboard Escalations |
+| `voice_sessions` | orchestrator (one per WS session) | dashboard Call log |
+| `transcript_turns` | orchestrator (guest/agent utterances) | dashboard Call log |
+| `tool_call_events` | orchestrator (every tool.call) | dashboard Call log |
+
+`voice_sessions.id` is the join key that turns isolated tool calls into a
+reviewable conversation — `tool_call_events.session_id` and
+`transcript_turns.session_id` are both FKs onto it, which is why
+`insert_voice_session` is the one blocking write in `orchestrator/inventory.py`
+(the parent row must exist before the fire-and-forget children reference it).

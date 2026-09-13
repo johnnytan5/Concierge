@@ -60,6 +60,7 @@ import multiprocessing as mp
 import os
 import urllib.error
 import urllib.request
+import uuid
 
 import numpy as np
 import sounddevice as sd
@@ -100,7 +101,10 @@ SYSTEM_PROMPT = (
     "an item carries dietary tags, ask the guest about the relevant "
     "preference before confirming. "
     "Anything that isn't a delivery or inventory request — late checkout, "
-    "lost card, billing, complaints — call escalate_to_frontdesk."
+    "lost card, billing, complaints — call escalate_to_frontdesk, and pass "
+    "the guest's room number as `room` whenever you know it: the front-desk "
+    "dashboard lists escalations by room, and one without a room is much "
+    "harder for staff to act on."
 )
 
 # Room numbers / dish names pulled straight from PLAN.md's scenarios (S1-S3) —
@@ -199,10 +203,15 @@ def ensure_agent(api_key: str, force_new: bool = False) -> str:
     return agent_id
 
 
-async def _run_session(ws, handlers: ToolHandlers, first_event: dict):
+async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id: str):
     """The steady-state event loop, entered once we know the connection
     didn't immediately fail (i.e. `first_event` is session.updated or
-    session.ready, not an error) — opens mic/speaker only at this point."""
+    session.ready, not an error) — opens mic/speaker only at this point.
+
+    `session_id` stamps the transcript turns written below. They used to be
+    print()-only, which meant the guest's actual words existed nowhere after
+    the process exited — the admin dashboard's Call log replays a call from
+    these rows plus the tool_call_events carrying the same id."""
     ready = asyncio.Event()
     loop = asyncio.get_running_loop()
     mic_q: asyncio.Queue = asyncio.Queue()
@@ -290,11 +299,15 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict):
                             }))
                         pending_results.clear()
 
-                elif etype == "transcript.user":
-                    print(f"guest: {ev.get('text', '')}")
-
-                elif etype == "transcript.agent":
-                    print(f"agent: {ev.get('text', '')}")
+                elif etype in ("transcript.user", "transcript.agent"):
+                    role = "guest" if etype == "transcript.user" else "agent"
+                    text = ev.get("text", "")
+                    print(f"{role}: {text}")
+                    # Empty transcripts do arrive (partials, barge-in); a
+                    # blank row would just be noise in the Call log, and the
+                    # column is NOT NULL anyway.
+                    if text:
+                        inventory.insert_transcript_turn(session_id, role, text)
 
                 else:
                     # debug: catch-all so nothing (reply.started, input.speech.*,
@@ -323,12 +336,14 @@ async def start_inventory():
     return asyncio.create_task(inventory.start_refresh_loop())
 
 
-async def run_agent(handlers: ToolHandlers, api_key: str):
+async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str):
     """Connects, self-healing once if the stored agent has vanished (see
     ensure_agent's docstring / module docstring's TTL note)."""
     headers = {"Authorization": f"Bearer {api_key}"}
+    loop = asyncio.get_running_loop()
     refresh_task = await start_inventory()  # before the session opens — see start_inventory
     agent_id = ensure_agent(api_key)
+    registered = False
 
     try:
         for attempt in (1, 2):
@@ -343,14 +358,32 @@ async def run_agent(handlers: ToolHandlers, api_key: str):
                         continue
                     raise RuntimeError(f"session error: {first}")
 
-                await _run_session(ws, handlers, first)
+                # Register the call only now that the connection is real:
+                # a failed first attempt shouldn't leave a phantom row, and
+                # agent_id here is the one that actually worked rather than
+                # the one we first tried. Blocking (via executor, never on
+                # the loop) because tool_call_events.session_id and
+                # transcript_turns.session_id are real FKs onto this row and
+                # every one of those writes is fire-and-forget — the parent
+                # has to exist first. See inventory.insert_voice_session.
+                await loop.run_in_executor(None, inventory.insert_voice_session,
+                                            session_id, agent_id)
+                registered = True
+                print(f"voice session {session_id} registered (agent {agent_id})")
+
+                await _run_session(ws, handlers, first, session_id)
                 return
     finally:
         refresh_task.cancel()
+        if registered:
+            await loop.run_in_executor(None, inventory.end_voice_session, session_id)
 
 
 def main():
     api_key = os.environ["ASSEMBLYAI_API_KEY"]
+    # One id per run = one "call" in the admin dashboard's Call log. Same
+    # short-hex shape as task_id, for consistency in the UI.
+    session_id = "sess_" + uuid.uuid4().hex[:12]
 
     cmd_queue: mp.Queue = mp.Queue()
     manager = mp.Manager()
@@ -359,9 +392,9 @@ def main():
     engine_proc = mp.Process(target=run_task_engine, args=(cmd_queue, state), daemon=True)
     engine_proc.start()
 
-    handlers = ToolHandlers(cmd_queue, state)
+    handlers = ToolHandlers(cmd_queue, state, session_id=session_id)
     try:
-        asyncio.run(run_agent(handlers, api_key))
+        asyncio.run(run_agent(handlers, api_key, session_id))
     except KeyboardInterrupt:
         pass
     finally:

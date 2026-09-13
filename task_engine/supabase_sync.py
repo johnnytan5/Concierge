@@ -24,10 +24,15 @@ def _get_client() -> Client:
 
 
 def poll_pending_commands(robot_ids: list[str]) -> list[dict]:
+    """`cmd` is one of complete_loading / complete_collection (the robot
+    screen's human confirmations) or recall (the admin dashboard's Fleet
+    tab). `reason` only accompanies recall. Ordered so a burst of commands
+    for one robot is applied in the order an operator issued them."""
     resp = (_get_client().table("robot_commands")
-            .select("id,robot_id,cmd")
+            .select("id,robot_id,cmd,reason")
             .eq("status", "pending")
             .in_("robot_id", robot_ids)
+            .order("created_at")
             .execute())
     return resp.data
 
