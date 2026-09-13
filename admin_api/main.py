@@ -8,6 +8,8 @@ go directly from the browser to Supabase via Realtime + the anon key —
 this app has no read/GET endpoints at all.
 """
 import os
+import secrets
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -40,9 +42,19 @@ def _get_client() -> Client:
     return _client
 
 
-def require_admin_password(x_admin_password: str = Header(...)):
-    if x_admin_password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="wrong password")
+def require_admin_password(x_admin_password: str | None = Header(default=None)):
+    """Optional header, not a required one: `Header(...)` makes FastAPI reject
+    a missing header as a 422 validation error before this function runs, so
+    "no credentials" and "malformed request" became indistinguishable to the
+    caller. The dashboard keys off 401 to re-prompt for the password, and a
+    422 there surfaces as a raw validation message instead.
+
+    compare_digest keeps the check constant-time. This is a shared password,
+    not real auth (see the admin-dashboard design spec), but leaking its
+    length or prefix through timing is free to avoid.
+    """
+    if x_admin_password is None or not secrets.compare_digest(x_admin_password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="wrong or missing admin password")
 
 
 class ItemIn(BaseModel):
@@ -102,3 +114,56 @@ def complete_collection(robot_id: str):
         {"robot_id": robot_id, "cmd": "complete_collection"}
     ).execute()
     return {"ack": True}
+
+
+class RecallIn(BaseModel):
+    reason: str
+
+
+@app.post("/admin/robots/{robot_id}/recall", dependencies=[Depends(require_admin_password)])
+def recall_robot(robot_id: str, body: RecallIn):
+    """Admin-initiated recall from the dashboard's Fleet tab.
+
+    Password-gated, unlike the two /robot/* endpoints above — those are the
+    robot's own kiosk screen confirming a human action at the machine, this
+    is an operator reaching across the floor to pull a robot off its run.
+
+    Returns immediately: the task engine picks the row up on its next
+    Supabase poll (~1s) and resolves robot -> current task itself. A recall
+    for an idle robot is accepted and lands as a no-op there rather than
+    being rejected here, since the engine's view of who is carrying what is
+    authoritative and this process's would be a stale guess.
+    """
+    if robot_id not in ROBOT_IDS:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    _get_client().table("robot_commands").insert(
+        {"robot_id": robot_id, "cmd": "recall", "reason": body.reason}
+    ).execute()
+    return {"ack": True}
+
+
+@app.post("/admin/escalations/{escalation_id}/resolve",
+          dependencies=[Depends(require_admin_password)])
+def resolve_escalation(escalation_id: str):
+    resp = (_get_client().table("frontdesk_escalations")
+            .update({"status": "resolved",
+                     "resolved_at": datetime.now(timezone.utc).isoformat()})
+            .eq("id", escalation_id)
+            .execute())
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="escalation not found")
+    return resp.data[0]
+
+
+@app.post("/admin/escalations/{escalation_id}/reopen",
+          dependencies=[Depends(require_admin_password)])
+def reopen_escalation(escalation_id: str):
+    """Undo for the above. Resolving is one click on a live floor; without
+    a way back, a misclick buries a guest problem permanently."""
+    resp = (_get_client().table("frontdesk_escalations")
+            .update({"status": "open", "resolved_at": None})
+            .eq("id", escalation_id)
+            .execute())
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="escalation not found")
+    return resp.data[0]
