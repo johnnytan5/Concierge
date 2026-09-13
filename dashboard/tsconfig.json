@@ -11,6 +11,10 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // lib/format.test.ts imports './format.ts' explicitly so Node's own test
+    // runner can execute it directly (node --test lib/format.test.ts) with no
+    // test framework. Legal here because noEmit is on.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [

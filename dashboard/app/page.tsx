@@ -1,17 +1,21 @@
-import FlowDiagram from '@/components/FlowDiagram'
+import RobotAdmin from '../components/RobotAdmin';
 
-export default function Home() {
+/**
+ * The admin surface. Five tabs, all reading live Supabase state.
+ *
+ * `devMode` is the initial view only — the header carries a Staff/Dev toggle,
+ * so an operator can flip to table names and endpoints without a redeploy.
+ */
+export default function Page() {
   return (
-    <main className="pageMain">
-      <header className="pageHeader">
-        <span className="pageTag">{'// Concierge Ops'}</span>
-        <h1 className="pageTitle">Concierge — Live</h1>
-        <span className="pageStatus">
-          <span className="statusDot" />
-          Realtime Feed
-        </span>
-      </header>
-      <FlowDiagram />
-    </main>
-  )
+    <RobotAdmin
+      devMode={false}
+      navLayout="sidebar"
+      fleetViz="steps"
+      showProposals
+      // switch to "live" when recording the demo, so the first frame is the
+      // call rather than the fleet
+      initialTab="fleet"
+    />
+  );
 }
