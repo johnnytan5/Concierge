@@ -9,3 +9,6 @@ demo/*.mov
 .venv/
 .worktrees/
 .superpowers/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
