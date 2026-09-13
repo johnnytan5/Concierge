@@ -45,6 +45,19 @@ def _new_robot():
     return {"phase": "IDLE", "pose_frac": 0.0, "battery": 100.0, "current_task": None}
 
 
+def eta_seconds_for(room: str) -> float:
+    """Real per-room delivery estimate, from that room's actual path length.
+
+    Replaces the old single BASE_ETA_SECONDS constant, which assumed every
+    room was the same fixed distance from the desk. With an L-shaped corridor
+    that is plainly false — the far wing is genuinely farther, and the whole
+    point of the scene is that it shows on camera.
+
+    Raises KeyError for a room with no path; callers that take a room from a
+    guest must handle that (see orchestrator/tools.py dispatch_delivery)."""
+    return nav.total_length(nav.path_for(room)) / DRIVE_SPEED_MPS
+
+
 def _new_task(task_id, room, items, priority):
     return {
         "task_id": task_id,
@@ -62,7 +75,7 @@ def _new_task(task_id, room, items, priority):
         "dispatched_at": None,
         "arrived_at": None,
         "progress_m": 0.0,   # arc length covered along nav.path_for(room), reset each leg
-        "eta_seconds": nav.total_length(nav.path_for(room)) / DRIVE_SPEED_MPS,
+        "eta_seconds": eta_seconds_for(room),
         "announced": False,
         "reason": None,
         "speech_done_collecting": False,
@@ -119,6 +132,33 @@ def _handle(cmd, tasks):
         if t:
             t["announced"] = True
             tasks[cmd["task_id"]] = t
+
+
+def _route_command(cmd_row: dict, robots: dict, tasks: dict, confirmed: dict):
+    """Dispatch one `robot_commands` row.
+
+    Three commands share this table and they are NOT interchangeable:
+    complete_loading/complete_collection are the robot screen's human
+    confirmations, recall is the admin dashboard pulling a robot off its run.
+    Before recall existed every pending row was treated as a confirmation, so
+    routing it wrong would make an operator recalling a robot at the door
+    register instead as the guest collecting their order — the delivery would
+    complete as if it had been handed over.
+    """
+    rid = cmd_row["robot_id"]
+    if rid not in robots:
+        return  # a command for a robot this process doesn't own
+
+    if cmd_row["cmd"] == "recall":
+        # The dashboard recalls a ROBOT; the FSM recalls a TASK. Resolve one
+        # to the other here — an idle robot has nothing to recall, which is a
+        # no-op rather than an error.
+        tid = robots[rid]["current_task"]
+        if tid is not None:
+            _handle({"cmd": "recall", "task_id": tid,
+                     "reason": cmd_row.get("reason")}, tasks)
+    else:
+        confirmed[rid] = True
 
 
 def _drive_home(sim, task, now, terminal_phase, drive_speed, arrival_tolerance_m):
@@ -296,7 +336,7 @@ def run(cmd_queue, state):
                 # Keep driving; the robot matters more than the mirror.
                 try:
                     for cmd_row in supabase_sync.poll_pending_commands(ROBOT_IDS):
-                        confirmed[cmd_row["robot_id"]] = True
+                        _route_command(cmd_row, robots, tasks, confirmed)
                         supabase_sync.mark_command_done(cmd_row["id"])
                 except Exception as e:
                     print(f"[task_engine] supabase poll failed, continuing: {e!r}")
@@ -346,6 +386,50 @@ def run(cmd_queue, state):
 
 
 if __name__ == "__main__":
+    def routing_demo():
+        """Pure logic, no physics — runs first so it fails fast.
+
+        The thing under test is that the three robot_commands commands stay
+        distinguishable. Recall arriving as a confirmation is the dangerous
+        confusion: it would complete a delivery that nobody collected.
+        """
+        robots = {
+            "robot_1": {"phase": "ARRIVED", "current_task": "t1"},
+            "robot_2": {"phase": "IDLE", "current_task": None},
+        }
+        tasks = {}
+        _handle({"cmd": "dispatch", "task_id": "t1", "room": "1204", "items": ["towel"]}, tasks)
+        tasks["t1"]["phase"] = "ARRIVED"
+
+        # a recall must recall, and must NOT read as a collection confirmation
+        confirmed = {"robot_1": False, "robot_2": False}
+        _route_command({"id": "c1", "robot_id": "robot_1", "cmd": "recall",
+                        "reason": "guest not answering"}, robots, tasks, confirmed)
+        assert confirmed["robot_1"] is False, "recall must not set the confirmation flag"
+        assert tasks["t1"]["phase"] == "RETURNING", tasks["t1"]
+        assert tasks["t1"]["reason"] == "guest not answering", tasks["t1"]
+
+        # the two human confirmations still route as confirmations
+        for cmd in ("complete_loading", "complete_collection"):
+            confirmed = {"robot_1": False, "robot_2": False}
+            _route_command({"id": "c2", "robot_id": "robot_1", "cmd": cmd, "reason": None},
+                           robots, tasks, confirmed)
+            assert confirmed["robot_1"] is True, cmd
+
+        # recalling an idle robot is a no-op, not a crash
+        confirmed = {"robot_1": False, "robot_2": False}
+        _route_command({"id": "c3", "robot_id": "robot_2", "cmd": "recall", "reason": "idle"},
+                       robots, tasks, confirmed)
+        assert confirmed["robot_2"] is False
+
+        # a command for a robot this process doesn't own is ignored
+        confirmed = {"robot_1": False, "robot_2": False}
+        _route_command({"id": "c4", "robot_id": "robot_99", "cmd": "complete_loading",
+                        "reason": None}, robots, tasks, confirmed)
+        assert confirmed == {"robot_1": False, "robot_2": False}
+
+        print("command routing OK (recall vs confirmations kept distinct)")
+
     # ponytail: real physics, two real sims — this is the actual
     # integration point. `confirmed=True` passed directly here stands in
     # for Task 6b's Supabase polling, which this self-check doesn't need.
@@ -512,4 +596,5 @@ if __name__ == "__main__":
             for sim in sims.values():
                 sim.stop()
 
+    routing_demo()
     demo()

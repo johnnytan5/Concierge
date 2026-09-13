@@ -29,6 +29,13 @@ def _load() -> dict[str, list[tuple[float, float]]]:
     return _cache
 
 
+def known_rooms() -> list[str]:
+    """Every room with a hand-authored path, sorted. There is no pathfinding
+    here -- waypoints.json IS the route -- so this is the complete set of
+    rooms a delivery can be dispatched to."""
+    return sorted(_load())
+
+
 def path_for(room: str) -> list[tuple[float, float]]:
     """Raises KeyError on an unknown room -- a missing waypoint path for a
     room that already passed inventory validation is a real bug, not a
