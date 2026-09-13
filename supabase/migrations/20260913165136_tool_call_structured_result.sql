@@ -1,0 +1,13 @@
+-- tool_call_events.result_summary was being fed Python's str(dict) of the
+-- handler's return value, so the admin dashboard had a raw repr
+-- ({'task_id': 'd173bc61', 'eta_seconds': 90.909..., ...}) to render on a
+-- screen meant for front-desk staff. The column name always promised a
+-- summary; this makes it one.
+--
+-- The structured return moves here, as real jsonb: dev view pretty-prints it,
+-- and it stays queryable instead of being a string that has to be regexed.
+-- result_summary becomes one plain sentence.
+--
+-- Nullable, because rows written before this have no structured result. The
+-- dashboard falls back to result_summary for those.
+alter table tool_call_events add column result jsonb;
