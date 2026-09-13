@@ -1042,6 +1042,74 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
 ```
 
+### Task 3 amendment: canonical parking heading (`PARKING` phase + `_settle_heading()`)
+
+Found live, after the above was implemented and self-check-verified: a
+robot's parked heading (`ARRIVED`→`RETURNING`→`DONE`, or the recall
+equivalent ending in `AT_DESK`) was never constrained by anything --
+`pure_pursuit_step`'s arrival check only tests position
+(`hypot(...) <= arrival_tolerance_m`), never heading. Every room's
+waypoints path approaches the desk from `+x`, so driving home always
+leaves the robot parked facing `~180` degrees -- backward relative to
+where the *next* dispatch needs to head (every path's first leg moves in
+`+x`). Traced live: a second task dispatched to the same robot right
+after it parks starts already facing the wrong way, and under a
+mid-route recall that compounds enough to drive the robot into the
+near-arm corridor's south wall, where it physically wedges (position
+frozen solid for thousands of ticks -- confirmed not a slow convergence,
+a real stuck collision).
+
+**Fix:** insert a `PARKING` phase between arrival-in-position and the
+real terminal phase (`DONE`/`AT_DESK`). `_drive_home` transitions to
+`PARKING` (stashing the intended terminal phase in
+`task["_parking_terminal_phase"]`) once `pure_pursuit_step` reports
+`done`, instead of finalizing immediately. A new `_settle_heading(sim,
+task)` handles the `PARKING` phase in `_advance`: rotates in place
+(`v=0.0`, pure yaw correction toward `CANONICAL_PARK_YAW_RAD = 0.0`, i.e.
+facing `+x`) until within `PARK_HEADING_TOLERANCE_DEG = 5.0`, then calls
+`sim.stop_base()` and applies the real terminal phase. `v=0` is
+deliberate -- this is arrival polish, not navigation; there's no path
+left to follow, only a heading to fix, and re-invoking
+`pure_pursuit_step` here would immediately re-measure arc length off the
+now-behind-it reversed path.
+
+`PARKING` needed adding to `_handle`'s amend-guard tuple (a parking robot
+can't be amended, same as `ARRIVED`/`RETURNING`) and to `_new_task`'s
+phase-diagram comment. It does NOT need adding to `run()`'s
+`("DONE", "AT_DESK")` idle-check -- `PARKING` correctly keeps the robot
+marked busy until `_settle_heading` actually finalizes it.
+
+Verified live: the exact previously-stalling scenario (mid-EN_ROUTE
+recall on a robot dispatched immediately after finishing a prior
+delivery) now reaches `AT_DESK` in ~1577 ticks, where it previously never
+arrived within a 9000-tick budget. All four self-check scenarios (both
+outbound arrivals, guest-confirmed return, mid-route recall, ARRIVED
+recall) pass with real measured tick counts.
+
+```bash
+git add task_engine/engine.py
+git commit -m "engine.py: canonical parking heading (PARKING phase + _settle_heading)
+
+Fixes a real bug found live: pure_pursuit_step's arrival check only
+constrains position, never heading, so a robot parks at whatever
+heading it happens to be facing -- and since every room's path
+approaches the desk from +x, that's always ~180 degrees backward
+relative to where the next dispatch needs to head. A second task
+dispatched to the same robot right after it parks starts already
+facing the wrong way; under a mid-route recall this compounded into
+the robot driving into a wall and physically wedging (confirmed live,
+traced tick-by-tick -- not a slow convergence, a real stuck collision).
+
+New PARKING phase sits between position-arrival and the real terminal
+phase (DONE/AT_DESK); _settle_heading() rotates in place to a
+canonical heading (facing +x, matching every path's first leg) before
+finalizing. Verified live: the exact scenario that used to never
+arrive within a 9000-tick budget now reaches AT_DESK in ~1577 ticks.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RKMd6CfzZwg23w1Pe6PDRt"
+```
+
 ---
 
 ## Task 4: `orchestrator/tools.py` — per-room ETA

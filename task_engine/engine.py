@@ -18,6 +18,7 @@ per room (task_engine/waypoints.json), followed via pure pursuit
 corridor-scene-nav-design.md for the full design. The phase/state contract
 below is unchanged from the straight-line-distance version it replaced.
 """
+import math
 import os
 import queue
 import sys
@@ -50,8 +51,14 @@ def _new_task(task_id, room, items, priority):
         "room": room,
         "items": list(items),
         "priority": priority,
-        "phase": "QUEUED",   # QUEUED -> COLLECTING -> EN_ROUTE -> ARRIVED -> RETURNING -> DONE
-                              #                                 \-> RECALLED -> AT_DESK
+        "phase": "QUEUED",   # QUEUED -> COLLECTING -> EN_ROUTE -> ARRIVED -> RETURNING -> PARKING -> DONE
+                              #                                 \-> RECALLED -----------> PARKING -> AT_DESK
+                              # PARKING is a brief in-place re-orientation once position
+                              # has arrived home but before the task is considered fully
+                              # over -- see _settle_heading()'s docstring for why this
+                              # exists (a robot's parked heading was previously whatever
+                              # it happened to be, not standardized, and that caused a
+                              # real bug for the next task dispatched to the same robot).
         "dispatched_at": None,
         "arrived_at": None,
         "progress_m": 0.0,   # arc length covered along nav.path_for(room), reset each leg
@@ -73,7 +80,7 @@ def _handle(cmd, tasks):
 
     elif kind == "amend":
         t = tasks.get(cmd["task_id"])
-        if not t or t["phase"] in ("ARRIVED", "RETURNING", "DONE", "AT_DESK"):
+        if not t or t["phase"] in ("ARRIVED", "RETURNING", "PARKING", "DONE", "AT_DESK"):
             return
         items = (set(t["items"]) - set(cmd.get("remove") or [])) | set(cmd.get("add") or [])
         t["items"] = sorted(items)
@@ -103,7 +110,7 @@ def _handle(cmd, tasks):
         elif phase == "ARRIVED":
             t["phase"] = "RETURNING"  # _drive_home closes the door on the way
         else:
-            return  # RETURNING / RECALLED / DONE / AT_DESK -- already coming back or over
+            return  # RETURNING / RECALLED / PARKING / DONE / AT_DESK -- already coming back or over
         t["reason"] = cmd.get("reason")
         tasks[cmd["task_id"]] = t
 
@@ -117,27 +124,66 @@ def _handle(cmd, tasks):
 def _drive_home(sim, task, now, terminal_phase, drive_speed, arrival_tolerance_m):
     sim.close_door()  # idempotent ctrl target; covers a recall straight out of ARRIVED
     path = list(reversed(nav.path_for(task["room"])))
-
-    # On path transition (forward → reversed), progress_m was reset to 0.0 in _advance/recall.
-    # But the robot's actual position may be far along the reversed path (e.g., after driving
-    # partway to a room then recalling, the robot is close to the destination, projecting to
-    # ~87% arc length on the reversed path). The max() guard in pure_pursuit_step would lock
-    # progress_m = max(0.0, 4.4m) = 4.4m high, preventing further tracking. Instead, measure
-    # the robot's actual arc length on the reversed path and use that as starting progress_m,
-    # so max(measured, measured) ≈ measured and allows normal progress updates.
-    status = sim.pull_status()
-    measured_s = nav._closest_arc_length(path, status.base.xy[0], status.base.xy[1])
-    task["progress_m"] = measured_s
-
+    # task["progress_m"] here is whatever stale value the outbound leg left
+    # it at -- that's fine and needs no special handling. pure_pursuit_step
+    # never reads the incoming progress_m for its computation (see its own
+    # docstring on the max()-floor removal); new_progress_m is always
+    # derived fresh from the robot's real measured position every call.
     task["progress_m"], _, done = nav.pure_pursuit_step(
         sim, path, task["progress_m"], drive_speed,
         arrival_tolerance_m=arrival_tolerance_m)
     total = nav.total_length(path)
     frac = 1.0 - min(task["progress_m"] / total, 1.0) if total > 0 else 0.0  # walks 1 -> 0 on the way home
     if done:
-        sim.stop_base()
-        task["phase"] = terminal_phase
+        # Arriving in POSITION is not the same as being parked -- see
+        # _settle_heading()'s docstring. Hand off to PARKING instead of
+        # finalizing terminal_phase directly; _settle_heading applies it
+        # once heading is also standardized.
+        task["phase"] = "PARKING"
+        task["_parking_terminal_phase"] = terminal_phase
     return task, frac
+
+
+CANONICAL_PARK_YAW_RAD = 0.0  # facing +x -- every room's waypoints.json path
+                                # leaves the desk heading +x first (confirmed:
+                                # every entry's first two points increase x),
+                                # so this is the one heading that's actually
+                                # "ready to go" for whatever gets dispatched next
+PARK_HEADING_TOLERANCE_DEG = 5.0
+
+
+def _settle_heading(sim, task, steer_gain: float = 2.0):
+    """Real bug this exists to fix (found live, reproducibly, tracing a
+    robot's exact position tick-by-tick -- see the ledger and
+    HANDOFF-2026-09-13.md): `pure_pursuit_step`'s arrival check only ever
+    constrained POSITION (`hypot(...) <= arrival_tolerance_m`), never
+    heading. A robot driving home along a path that approaches the desk
+    from +x (every room's reversed path does) ends up parked facing
+    ~180 degrees -- backward relative to where the NEXT dispatch needs to
+    head. That robot then starts its next task already needing an
+    unplanned course-reversal, and in the worst case (confirmed live) that
+    compounds badly enough to drive the robot into a corridor wall, where
+    it physically wedges.
+
+    Fix: once position has arrived (`_drive_home` sets phase to PARKING),
+    rotate in place (v=0, pure yaw correction) until heading is within
+    `PARK_HEADING_TOLERANCE_DEG` of `CANONICAL_PARK_YAW_RAD`, THEN stop and
+    apply the real terminal phase. `v=0` deliberately -- this is arrival
+    polish, not navigation; there is no path to stay on, only a heading to
+    fix, and re-running pure_pursuit_step here would immediately re-measure
+    arc length off the (now-behind-it) reversed path and could pull the
+    robot back off the spot it just arrived at.
+    """
+    status = sim.pull_status()
+    yaw = math.radians(status.base.yaw_deg)
+    heading_error = math.atan2(math.sin(CANONICAL_PARK_YAW_RAD - yaw),
+                                math.cos(CANONICAL_PARK_YAW_RAD - yaw))
+    if abs(math.degrees(heading_error)) <= PARK_HEADING_TOLERANCE_DEG:
+        sim.stop_base()
+        task["phase"] = task.pop("_parking_terminal_phase")
+        return task, True
+    sim.drive(v=0.0, omega=steer_gain * heading_error)
+    return task, False
 
 
 def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
@@ -180,6 +226,10 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
 
     if task["phase"] == "RECALLED":
         return _drive_home(sim, task, now, "AT_DESK", drive_speed, arrival_tolerance_m)
+
+    if task["phase"] == "PARKING":
+        task, _settled = _settle_heading(sim, task)
+        return task, 1.0
 
     return task, None  # QUEUED / DONE / AT_DESK — no motion
 
@@ -302,7 +352,8 @@ if __name__ == "__main__":
             assert tasks["t1"]["phase"] == "EN_ROUTE"
             assert tasks["t2"]["phase"] == "EN_ROUTE"
 
-            for _ in range(1200):
+            i = 0
+            for i in range(1200):
                 tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
@@ -312,18 +363,26 @@ if __name__ == "__main__":
                 time.sleep(0.05)
             assert tasks["t1"]["phase"] == "ARRIVED", tasks["t1"]
             assert tasks["t2"]["phase"] == "ARRIVED", tasks["t2"]
+            print(f"[measured] both EN_ROUTE->ARRIVED: {i} ticks")
 
             # complete_collection -> RETURNING -> drive home -> DONE
             tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(), confirmed=True,
                                         drive_speed=speed, arrival_tolerance_m=tol_m)
             assert tasks["t1"]["phase"] == "RETURNING"
-            for _ in range(1200):
+            for i in range(3200):  # real margin over measured arrival (~2111-2225 ticks,
+                                     # including the PARKING settle-heading step).
+                                     # ARRIVED means facing INTO the room, so driving home
+                                     # needs the same kind of ~180-degree U-turn as a
+                                     # mid-route recall, plus the full 4m back through the
+                                     # corner -- much larger than a straight-line drive of
+                                     # the same distance would need
                 tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 if tasks["t1"]["phase"] == "DONE":
                     break
                 time.sleep(0.05)
             assert tasks["t1"]["phase"] == "DONE", tasks["t1"]
+            print(f"[measured] t1 (1204) RETURNING->DONE: {i} ticks")
 
             # recall while still COLLECTING -> immediate AT_DESK, no motion
             _handle({"cmd": "dispatch", "task_id": "t3", "room": "0804", "items": ["towel"]}, tasks)
@@ -332,13 +391,23 @@ if __name__ == "__main__":
             assert tasks["t3"]["phase"] == "AT_DESK", tasks["t3"]
 
             # recall MID-EN_ROUTE -- the real proof that reversing the path
-            # and resetting progress_m to 0.0 actually steers home rather
-            # than continuing toward the room. Since pure_pursuit_step now
-            # derives progress from the robot's real measured position (not
-            # a dead-reckoned/re-anchored estimate), this is what confirms
+            # actually steers home rather than continuing toward the room.
+            # pure_pursuit_step derives progress from the robot's real
+            # measured position every call and never reads task["progress_m"]
+            # for its computation (see nav.py's docstring), so this confirms
             # the reversed-path lookahead correctly re-targets the desk
-            # direction on the very first call after recall. robot_1 is
-            # free again (t1 finished above).
+            # direction from the very first call after recall, with no
+            # progress_m reset needed anywhere. robot_1 is free again (t1
+            # finished above) -- and this is also the scenario that
+            # originally exposed the need for _settle_heading()/PARKING: t1
+            # parked facing ~180 degrees (nothing previously canonicalized
+            # heading on arrival), so t4 dispatching straight after started
+            # already facing backward, and under recall that compounded into
+            # a real wall-wedge (confirmed live, traced tick-by-tick).
+            # _settle_heading() closes this by re-orienting to a canonical
+            # heading before a task is considered fully parked -- this
+            # sub-test is what actually proves that fix works end-to-end,
+            # not just in isolation.
             _handle({"cmd": "dispatch", "task_id": "t4", "room": "1205", "items": ["towel"]}, tasks)
             tasks["t4"]["phase"] = "COLLECTING"
             tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(), confirmed=True,
@@ -348,46 +417,42 @@ if __name__ == "__main__":
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 time.sleep(0.05)
             assert tasks["t4"]["phase"] == "EN_ROUTE", tasks["t4"]
-            pos_before_recall = sims["robot_1"].pull_status().base.xy
             _handle({"cmd": "recall", "task_id": "t4", "reason": "wrong room number"}, tasks)
             assert tasks["t4"]["phase"] == "RECALLED", tasks["t4"]
-            for _ in range(300):  # enough ticks for wide U-turn to complete and steer back toward desk
+            for i in range(2400):  # real margin over measured arrival (~1577 ticks, including
+                                     # PARKING) -- this is the scenario that used to stall
+                                     # forever before _settle_heading() existed
                 tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
-                time.sleep(0.05)
-            pos_after_recall = sims["robot_1"].pull_status().base.xy
-            dist_before = (pos_before_recall[0] ** 2 + pos_before_recall[1] ** 2) ** 0.5
-            dist_after = (pos_after_recall[0] ** 2 + pos_after_recall[1] ** 2) ** 0.5
-            assert dist_after < dist_before, (
-                "recall mid-EN_ROUTE should steer back toward the desk (distance from "
-                "origin decreasing), not toward the room -- the fixed progress_m "
-                "initialization prevents the U-turn lock", pos_before_recall, pos_after_recall)
-            for _ in range(1200):
-                tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(),
-                                            drive_speed=speed, arrival_tolerance_m=tol_m)
-                if tasks["t4"]["phase"] == "DONE":
+                if tasks["t4"]["phase"] == "AT_DESK":
                     break
                 time.sleep(0.05)
-            assert tasks["t4"]["phase"] == "DONE", tasks["t4"]
+            assert tasks["t4"]["phase"] == "AT_DESK", tasks["t4"]
+            print(f"[measured] t4 (1205) mid-recall RECALLED->AT_DESK: {i} ticks")
 
             # recall while ARRIVED (nobody came to the door) -> drives home
             assert tasks["t2"]["phase"] == "ARRIVED"
             _handle({"cmd": "recall", "task_id": "t2", "reason": "guest not answering"}, tasks)
             assert tasks["t2"]["phase"] == "RETURNING", tasks["t2"]
-            for _ in range(1200):
+            for i in range(2400):  # real margin over measured arrival (~1565-1679 ticks,
+                                     # including PARKING) -- same ARRIVED-facing-in U-turn
+                                     # as t1 above, over 0803's shorter ~2m near-arm path
                 tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 if tasks["t2"]["phase"] == "DONE":
                     break
                 time.sleep(0.05)
             assert tasks["t2"]["phase"] == "DONE", tasks["t2"]
+            print(f"[measured] t2 (0803) recall-from-ARRIVED RETURNING->DONE: {i} ticks")
             door = sims["robot_2"].pull_status().door
             print(f"robot_2 door after recall-from-ARRIVED: {door}")
 
             print("engine self-check OK (real corridor scene: near-arm + far-arm "
                   "rooms through the real corner, differing per-room ETA, "
                   "door-open symmetry, recall from COLLECTING/EN_ROUTE/ARRIVED "
-                  "-- including the mid-EN_ROUTE reversed-path progress reset)")
+                  "-- including a mid-EN_ROUTE recall on a robot reused right "
+                  "after its prior delivery, which needs _settle_heading()'s "
+                  "canonical-parking fix to succeed)")
         finally:
             for sim in sims.values():
                 sim.stop()
