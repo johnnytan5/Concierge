@@ -608,17 +608,26 @@ if __name__ == "__main__":
             # forward-path value through is exactly what a real caller
             # (engine.py's _drive_home) does, and exactly the case that
             # would have locked up under the old max()-floor design.
+            # Tick budget (2000) has real margin over the measured real-physics
+            # arrival (~1511 ticks). Much larger than the other two scenarios'
+            # budgets because the U-turn is slow to resolve, not stuck: traced
+            # tick-by-tick, heading_error starts near +/-180 degrees (still
+            # facing the way it came) and shrinks monotonically but slowly --
+            # the textbook slow case for `omega = steer_gain * heading_error`
+            # near the discontinuity, compounded by the real force-controlled
+            # actuators not reaching commanded angular velocity instantly.
+            # Confirmed by tracing real position every 500 ticks: it moves
+            # further from the desk before turning, then closes in and
+            # arrives -- never freezes, never reverses direction permanently.
             reversed_done = False
-            for _ in range(200):
+            for _ in range(2000):
                 progress, frac, reversed_done = pure_pursuit_step(sim, reversed_path, progress, speed)
                 if reversed_done:
                     break
                 time.sleep(loop_sleep_s)
             assert reversed_done, (
                 "did not complete the reversed-path U-turn back to the desk within "
-                "the tick budget -- tune the budget against a real measured run "
-                "(step 3), same way the other two scenarios above document their "
-                "real measured-arrival tick counts")
+                "the tick budget")
             print(f"0803 reversed (recall/return-trip regression): arrived, frac reached {frac:.2f}")
         finally:
             sim.stop()
