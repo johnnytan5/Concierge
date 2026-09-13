@@ -22,4 +22,5 @@ pandas
 # Admin API (4th process — admin_api/)
 fastapi
 uvicorn
-supabase
+# supabase already listed above (shared client library, every backend
+# process uses it)
