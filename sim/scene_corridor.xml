@@ -8,15 +8,15 @@
     the layout grew (see delivery_bot_v2.xml) with real margin, confirmed by
     rendering the `top` camera each time.
 
-    Corridor cross-section widened twice now: 0.3m -> 0.45m -> 0.55m
-    half-width (0.6m -> 1.1m clear width total) -- the original left only
-    ~0.1m clearance on each side of the robot's ~0.4m outer diameter, which
-    read as "the robot fills the whole aisle." This only moves wall
-    *positions* further from each centerline; the centerlines themselves
-    (and therefore every waypoints.json coordinate) are unchanged, so no nav
-    code needed to change -- re-verified via nav.py's full self-check after
-    each widening pass (corner wall-contact regression + reversed-path
-    regression), not just assumed safe.
+    Corridor cross-section widened three times now: 0.3m -> 0.45m -> 0.55m
+    -> 0.65m half-width (0.6m -> 1.3m clear width total) -- the original
+    left only ~0.1m clearance on each side of the robot's ~0.4m outer
+    diameter, which read as "the robot fills the whole aisle." This only
+    moves wall *positions* further from each centerline; the centerlines
+    themselves (and therefore every waypoints.json coordinate) are
+    unchanged, so no nav code needed to change -- re-verified via nav.py's
+    full self-check after each widening pass (corner wall-contact
+    regression + reversed-path regression), not just assumed safe.
 
     See sim/delivery_bot_v2.xml for the robot model itself -- unchanged
     except the two camera additions in Task 1 Step 1 and the floor-size fixes.
@@ -62,7 +62,7 @@
          wall, mode="targetbodycom" keeps the robot framed regardless of
          its exact pose (it's mid-turn toward the desk during this shot,
          not yet settled). -->
-    <camera name="lobby_side_view" mode="targetbodycom" target="robot" pos="-1.35 -0.75 0.7"/>
+    <camera name="lobby_side_view" mode="targetbodycom" target="robot" pos="-1.65 -0.75 0.7"/>
 
     <!-- Guest/staff-eye view of the front desk area, world-fixed (does NOT
          move with the robot, unlike chase/lid) -- mode="targetbodycom"
@@ -83,7 +83,7 @@
          multiple overlapping sources tend to look noisy rather than
          atmospheric at this scale -- cheap fix, matches how the robot's
          own two lights are already set up (no castshadow either). -->
-    <light name="lobby_light" pos="-1.2 0 0.95" dir="0 0 -1" diffuse="0.9 0.82 0.68" ambient="0.3 0.27 0.22" castshadow="false"/>
+    <light name="lobby_light" pos="-1.5 0 0.95" dir="0 0 -1" diffuse="0.9 0.82 0.68" ambient="0.3 0.27 0.22" castshadow="false"/>
     <light name="hall_light_near" pos="1.5 0 0.95" dir="0 0 -1" diffuse="0.85 0.78 0.63" ambient="0.25 0.22 0.19" castshadow="false"/>
     <light name="hall_light_far" pos="3.0 1.8 0.95" dir="0 0 -1" diffuse="0.85 0.78 0.63" ambient="0.25 0.22 0.19" castshadow="false"/>
 
@@ -93,105 +93,116 @@
          into the lobby plus the L-shape; deliberate harmless overlap at
          the junction and at the lobby/near-arm seam rather than fighting
          for pixel-exact non-overlapping edges. near/far half-widths match
-         the corridor's 0.55m half-width; the lobby patch is wider still
+         the corridor's 0.65m half-width; the lobby patch is wider still
          (0.9m half-width) to read as its own space, not just a wide bit
          of hallway. -->
-    <geom name="carpet_lobby" type="box" pos="-0.85 0 0.001" size="0.75 0.9 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
-    <geom name="carpet_near" type="box" pos="1.5 0 0.001" size="1.7 0.55 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
-    <geom name="carpet_far" type="box" pos="3.0 1.65 0.001" size="0.55 1.75 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
+    <geom name="carpet_lobby" type="box" pos="-1.0 0 0.001" size="0.9 0.9 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
+    <geom name="carpet_near" type="box" pos="1.5 0 0.001" size="1.7 0.65 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
+    <geom name="carpet_far" type="box" pos="3.0 1.65 0.001" size="0.65 1.75 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
 
     <!-- Front desk -- sits on the corridor's own centerline (y=0), further
-         out in the lobby (x=-0.9, was -0.6) so there's real open floor
+         out in the lobby (x=-1.2, was -0.9) so there's real open floor
          between the corridor mouth and the counter rather than the robot
          parking right up against it. Entirely outside every room's
          waypoints.json path (all real paths live in x in [0,3.35], y in
          [0,3.35]), so it can never be driven into no matter how nav.py's
          steering is tuned -- non-colliding anyway, defensively, same
-         convention as the rest of this dressing pass. Widened (y half-size
-         0.45 -> 0.7) to read as a real reception counter rather than a
-         narrow stand, comfortably inside the lobby's own 0.9m half-width
-         with room to walk around it on both sides. -->
-    <body name="front_desk" pos="-0.9 0 0">
+         convention as the rest of this dressing pass. -->
+    <body name="front_desk" pos="-1.2 0 0">
       <geom name="desk_body" type="box" pos="0 0 0.25" size="0.12 0.7 0.25" material="desk_wood" contype="0" conaffinity="0"/>
       <geom name="desk_top" type="box" pos="0 0 0.505" size="0.14 0.72 0.01" material="desk_top" contype="0" conaffinity="0"/>
       <geom name="desk_sign" type="box" pos="0.13 0 0.62" size="0.01 0.3 0.05" material="sign_brass" contype="0" conaffinity="0"/>
     </body>
 
     <!-- Vestibule walls -- decorative enclosure around the lobby so it
-         reads as a real room rather than open void past the desk. Widened
-         to 0.9m half-width (was 0.475m) and the back wall pushed out to
-         x=-1.6 (was -1.3) to keep real clearance behind the now-further,
-         now-wider desk. Non-colliding, same as every other decorative
-         addition here. -->
-    <geom name="lobby_back" type="box" pos="-1.6 0 0.5" size="0.025 0.9 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="lobby_side_s" type="box" pos="-0.85 -0.9 0.5" size="0.75 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="lobby_side_n" type="box" pos="-0.85 0.9 0.5" size="0.75 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+         reads as a real room rather than open void past the desk. Back
+         wall pushed out to x=-1.9 (was -1.6) to keep real clearance behind
+         the now-further desk (same ~0.58m gap as before). Non-colliding,
+         same as every other decorative addition here. -->
+    <geom name="lobby_back" type="box" pos="-1.9 0 0.5" size="0.025 0.9 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="lobby_side_s" type="box" pos="-1.0 -0.9 0.5" size="0.9 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="lobby_side_n" type="box" pos="-1.0 0.9 0.5" size="0.9 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
 
     <!-- ============ Near arm (desk -> junction), centerline y=0 ============ -->
 
-    <!-- South wall (y=-0.55 inner face), broken by room 0803's door gap
+    <!-- South wall (y=-0.65 inner face), broken by room 0803's door gap
          (x: 0.8 to 1.2) -->
-    <geom name="wall_s_near_a" type="box" pos="0.35 -0.575 0.5" size="0.45 0.025 0.5" material="wall_paint"/>
-    <geom name="wall_s_near_b" type="box" pos="2.25 -0.575 0.5" size="1.05 0.025 0.5" material="wall_paint"/>
-    <geom name="0803" type="box" pos="1.0 -0.575 0.5" size="0.2 0.025 0.5" material="door_panel"/>
+    <geom name="wall_s_near_a" type="box" pos="0.35 -0.675 0.5" size="0.45 0.025 0.5" material="wall_paint"/>
+    <geom name="wall_s_near_b" type="box" pos="2.25 -0.675 0.5" size="1.05 0.025 0.5" material="wall_paint"/>
+    <geom name="0803" type="box" pos="1.0 -0.675 0.5" size="0.2 0.025 0.5" material="door_panel"/>
 
     <!-- Room 0803 interior, visible through the door gap -- non-colliding,
          entirely outside any waypoint path (paths never leave the
          corridor), sized to match the corridor walls' 1.0m height. -->
-    <geom name="room0803_back" type="box" pos="1.0 -1.55 0.5" size="0.35 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room0803_left" type="box" pos="0.65 -1.0625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room0803_right" type="box" pos="1.35 -1.0625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room0803_bed" type="box" pos="1.0 -1.3 0.15" size="0.25 0.15 0.15" material="bed_linen" contype="0" conaffinity="0"/>
-    <geom name="room0803_window" type="box" pos="1.0 -1.575 0.55" size="0.15 0.005 0.15" material="window_glass" contype="0" conaffinity="0"/>
+    <geom name="room0803_back" type="box" pos="1.0 -1.65 0.5" size="0.35 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room0803_left" type="box" pos="0.65 -1.1625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room0803_right" type="box" pos="1.35 -1.1625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room0803_bed" type="box" pos="1.0 -1.4 0.15" size="0.25 0.15 0.15" material="bed_linen" contype="0" conaffinity="0"/>
+    <geom name="room0803_window" type="box" pos="1.0 -1.675 0.55" size="0.15 0.005 0.15" material="window_glass" contype="0" conaffinity="0"/>
 
-    <!-- North wall (y=+0.55 inner face), stops before the junction (must
+    <!-- North wall (y=+0.65 inner face), stops before the junction (must
          leave room for the far arm's own widened corridor to pass
          through), broken by 0804's gap -->
-    <geom name="wall_n_near_a" type="box" pos="0.85 0.575 0.5" size="0.95 0.025 0.5" material="wall_paint"/>
-    <geom name="wall_n_near_b" type="box" pos="2.325 0.575 0.5" size="0.125 0.025 0.5" material="wall_paint"/>
-    <geom name="0804" type="box" pos="2.0 0.575 0.5" size="0.2 0.025 0.5" material="door_panel"/>
+    <geom name="wall_n_near_a" type="box" pos="0.85 0.675 0.5" size="0.95 0.025 0.5" material="wall_paint"/>
+    <geom name="wall_n_near_b" type="box" pos="2.275 0.675 0.5" size="0.075 0.025 0.5" material="wall_paint"/>
+    <geom name="0804" type="box" pos="2.0 0.675 0.5" size="0.2 0.025 0.5" material="door_panel"/>
 
     <!-- Room 0804 interior -->
-    <geom name="room0804_back" type="box" pos="2.0 1.55 0.5" size="0.35 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room0804_left" type="box" pos="1.65 1.0625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room0804_right" type="box" pos="2.35 1.0625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room0804_bed" type="box" pos="2.0 1.3 0.15" size="0.25 0.15 0.15" material="bed_linen" contype="0" conaffinity="0"/>
-    <geom name="room0804_window" type="box" pos="2.0 1.575 0.55" size="0.15 0.005 0.15" material="window_glass" contype="0" conaffinity="0"/>
+    <geom name="room0804_back" type="box" pos="2.0 1.65 0.5" size="0.35 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room0804_left" type="box" pos="1.65 1.1625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room0804_right" type="box" pos="2.35 1.1625 0.5" size="0.025 0.4875 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room0804_bed" type="box" pos="2.0 1.4 0.15" size="0.25 0.15 0.15" material="bed_linen" contype="0" conaffinity="0"/>
+    <geom name="room0804_window" type="box" pos="2.0 1.675 0.55" size="0.15 0.005 0.15" material="window_glass" contype="0" conaffinity="0"/>
 
     <!-- ============ Far arm (junction -> dead end), centerline x=3.0 ============ -->
 
-    <!-- East wall (x=+3.575 inner face), broken by room 1204's door gap -->
-    <geom name="wall_e_far_a" type="box" pos="3.575 0.35 0.5" size="0.025 0.45 0.5" material="wall_paint"/>
-    <geom name="wall_e_far_b" type="box" pos="3.575 2.25 0.5" size="0.025 1.05 0.5" material="wall_paint"/>
-    <geom name="1204" type="box" pos="3.575 1.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
+    <!-- East wall (x=+3.65 inner face), broken by room 1204's door gap -->
+    <geom name="wall_e_far_a" type="box" pos="3.65 0.35 0.5" size="0.025 0.45 0.5" material="wall_paint"/>
+    <geom name="wall_e_far_b" type="box" pos="3.65 2.25 0.5" size="0.025 1.05 0.5" material="wall_paint"/>
+    <geom name="1204" type="box" pos="3.65 1.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
 
     <!-- Room 1204 interior -->
-    <geom name="room1204_back" type="box" pos="4.55 1.0 0.5" size="0.025 0.35 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room1204_near" type="box" pos="4.0625 0.65 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room1204_far" type="box" pos="4.0625 1.35 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room1204_bed" type="box" pos="4.3 1.0 0.15" size="0.15 0.25 0.15" material="bed_linen" contype="0" conaffinity="0"/>
-    <geom name="room1204_window" type="box" pos="4.55 1.0 0.55" size="0.005 0.15 0.15" material="window_glass" contype="0" conaffinity="0"/>
+    <geom name="room1204_back" type="box" pos="4.625 1.0 0.5" size="0.025 0.35 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room1204_near" type="box" pos="4.1375 0.65 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room1204_far" type="box" pos="4.1375 1.35 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room1204_bed" type="box" pos="4.375 1.0 0.15" size="0.15 0.25 0.15" material="bed_linen" contype="0" conaffinity="0"/>
+    <geom name="room1204_window" type="box" pos="4.625 1.0 0.55" size="0.005 0.15 0.15" material="window_glass" contype="0" conaffinity="0"/>
 
-    <!-- West wall (x=+2.425 inner face), starts at y=0.55 (must leave room
+    <!-- West wall (x=+2.35 inner face), starts at y=0.65 (must leave room
          for the near arm's own widened corridor to pass through the
          junction), broken by 1205's gap -->
-    <geom name="wall_w_far_a" type="box" pos="2.425 1.1875 0.5" size="0.025 0.6125 0.5" material="wall_paint"/>
-    <geom name="wall_w_far_b" type="box" pos="2.425 2.75 0.5" size="0.025 0.55 0.5" material="wall_paint"/>
-    <geom name="1205" type="box" pos="2.425 2.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
+    <geom name="wall_w_far_a" type="box" pos="2.35 1.2375 0.5" size="0.025 0.5625 0.5" material="wall_paint"/>
+    <geom name="wall_w_far_b" type="box" pos="2.35 2.75 0.5" size="0.025 0.55 0.5" material="wall_paint"/>
+    <geom name="1205" type="box" pos="2.35 2.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
     <!-- was material="wall_paint" -- a Minor finding parked during Task 1's
          review (inherited from the brief's own coordinates, not this
          implementer's error); fixed here as part of this same pass since
          it's a one-word, zero-risk change. -->
 
     <!-- Room 1205 interior -->
-    <geom name="room1205_back" type="box" pos="1.45 2.0 0.5" size="0.025 0.35 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room1205_near" type="box" pos="1.9375 1.65 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room1205_far" type="box" pos="1.9375 2.35 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
-    <geom name="room1205_bed" type="box" pos="1.7 2.0 0.15" size="0.15 0.25 0.15" material="bed_linen" contype="0" conaffinity="0"/>
-    <geom name="room1205_window" type="box" pos="1.45 2.0 0.55" size="0.005 0.15 0.15" material="window_glass" contype="0" conaffinity="0"/>
+    <geom name="room1205_back" type="box" pos="1.375 2.0 0.5" size="0.025 0.35 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room1205_near" type="box" pos="1.8625 1.65 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room1205_far" type="box" pos="1.8625 2.35 0.5" size="0.4875 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
+    <geom name="room1205_bed" type="box" pos="1.625 2.0 0.15" size="0.15 0.25 0.15" material="bed_linen" contype="0" conaffinity="0"/>
+    <geom name="room1205_window" type="box" pos="1.375 2.0 0.55" size="0.005 0.15 0.15" material="window_glass" contype="0" conaffinity="0"/>
 
     <!-- Dead-end cap past room 1205, widened to match the new corridor
          cross-section -->
-    <geom name="wall_end_far" type="box" pos="3.0 3.325 0.5" size="0.6 0.025 0.5" material="wall_paint"/>
+    <geom name="wall_end_far" type="box" pos="3.0 3.325 0.5" size="0.675 0.025 0.5" material="wall_paint"/>
+
+    <!-- Outer L-corner fill, south-east: the near-arm's south wall
+         (wall_s_near_b, ends at x=3.3) and the far-arm's east wall
+         (wall_e_far_a, starts at y=-0.1) never actually met -- a real gap
+         inherited from Task 1's original brief coordinates (same root
+         cause as the 1205-door-material Minor above), visible as an open
+         notch at the L's outer corner. This is purely a building-envelope
+         gap, not a nav issue (it sits entirely behind the walls that
+         already block the robot from ever reaching it), but it looks
+         wrong from the top camera and up close. One box closes it exactly:
+         computed from the two walls' actual edges (x from wall_s_near_b's
+         end at 3.3 to wall_e_far_a's outer face at 3.675; y from
+         wall_e_far_a's south end at -0.1 to wall_s_near_a's outer face at
+         -0.7), not eyeballed. -->
+    <geom name="wall_corner_se" type="box" pos="3.4875 -0.4 0.5" size="0.1875 0.3 0.5" material="wall_paint"/>
   </worldbody>
 </mujoco>
