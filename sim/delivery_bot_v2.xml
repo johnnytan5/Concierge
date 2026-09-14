@@ -31,7 +31,7 @@
   </default>
 
   <worldbody>
-    <geom type="plane" size="5 3.5 .01" material="grid"/>
+    <geom type="plane" size="5.2 3.6 .01" material="grid"/>
 
     <body name="robot" pos="0 0 0.09">
       <freejoint/>

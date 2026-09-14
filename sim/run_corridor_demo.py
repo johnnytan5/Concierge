@@ -45,15 +45,25 @@ def demo():
         tasks["demo"]["phase"] = "COLLECTING"
         print(f"[demo] phase=COLLECTING -- door opening, ETA {tasks['demo']['eta_seconds']:.1f}s")
 
-        # "worker loading the bin" -- guest_view is a world-fixed camera near
-        # the front desk (does NOT move with the robot, unlike lid/chase),
-        # aimed via targetbodycom so it always frames the robot. The robot
-        # turns to face the desk during COLLECTING (engine.py's
-        # _rotate_toward/DESK_FACE_YAW_RAD), which puts its door facing this
-        # camera -- that's the actual "watch it open" shot. Real settle time
-        # measured at ~124 ticks (traced tick-by-tick), 180 has margin.
+        # "worker loading the bin" -- two-shot sequence. First, an
+        # establishing side-on view of the lobby (lobby_side_view) as the
+        # robot begins turning toward the desk -- reads as "here's the
+        # scene" before the close-up. Then cut to guest_view, the closer
+        # head-on shot: the robot turns to face the desk during COLLECTING
+        # (engine.py's _rotate_toward/DESK_FACE_YAW_RAD), which puts its
+        # door facing this camera -- that's the actual "watch it open"
+        # shot. Both are world-fixed (unlike lid/chase) and use
+        # mode="targetbodycom" so they always frame the robot regardless of
+        # its exact pose. Real settle time measured at ~124 ticks
+        # (traced tick-by-tick); 60 (side) + 120 (guest) = 180 has margin.
+        _set_camera(sim, "lobby_side_view")
+        for _ in range(60):
+            tasks["demo"], _ = engine._advance(sim, tasks["demo"], time.time(),
+                                                drive_speed=speed, arrival_tolerance_m=tol_m)
+            time.sleep(0.05)
+
         _set_camera(sim, "guest_view")
-        for _ in range(180):
+        for _ in range(120):
             tasks["demo"], _ = engine._advance(sim, tasks["demo"], time.time(),
                                                 drive_speed=speed, arrival_tolerance_m=tol_m)
             time.sleep(0.05)
