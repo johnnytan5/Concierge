@@ -80,6 +80,9 @@ def _new_task(task_id, room, items, priority):
         "reason": None,
         "speech_done_collecting": False,
         "speech_done_arrived": False,
+        "_leg_oriented": False,  # see _initial_bearing()'s docstring -- reset to
+                                  # False at the start of every leg (EN_ROUTE,
+                                  # RETURNING, RECALLED)
     }
 
 
@@ -120,8 +123,10 @@ def _handle(cmd, tasks):
         elif phase == "EN_ROUTE":
             t["phase"] = "RECALLED"
             t["dispatched_at"] = time.time()
+            t["_leg_oriented"] = False
         elif phase == "ARRIVED":
             t["phase"] = "RETURNING"  # _drive_home closes the door on the way
+            t["_leg_oriented"] = False
         else:
             return  # RETURNING / RECALLED / PARKING / DONE / AT_DESK -- already coming back or over
         t["reason"] = cmd.get("reason")
@@ -161,9 +166,62 @@ def _route_command(cmd_row: dict, robots: dict, tasks: dict, confirmed: dict):
         confirmed[rid] = True
 
 
+def _bearing_from_here(sim, path: list[tuple[float, float]], lookahead_m: float = 0.15) -> float:
+    """Bearing (radians) from the robot's REAL current position toward a
+    lookahead point on `path` -- the exact same projection
+    (`nav._closest_arc_length` -> `nav._point_at_arc_length`) that
+    `pure_pursuit_step` itself uses internally, just called before driving
+    starts (v=0 rotation) rather than during (v>0 driving).
+
+    Real bug this exists to fix, in two stages:
+
+    1. Both EN_ROUTE and `_drive_home` used to hand a path straight to
+       `pure_pursuit_step` (v=speed_mps>0) with whatever heading error the
+       robot happened to already have -- for EN_ROUTE right after
+       COLLECTING's turn-to-face-the-desk, that's a full ~180 degrees.
+       `pure_pursuit_step` drives forward while steering, so a large
+       heading error traces a wide swinging arc rather than turning on the
+       spot -- fine in open space, but the corridor is narrow enough that
+       the swing clips a wall before the steering catches up. Fixed by
+       rotating in place (v=0, via `_rotate_toward`) to the right bearing
+       FIRST, and only starting real pure-pursuit driving once already
+       close to it -- see the `_leg_oriented` gate in `_advance`'s
+       EN_ROUTE branch and in `_drive_home`.
+
+    2. The first version of this fix computed the bearing from `path`'s
+       fixed FIRST segment (point 0 to point 1) -- correct when the robot
+       is actually starting at the path's first point (true for a fresh
+       EN_ROUTE dispatch, and true for RETURNING/RECALLED-from-ARRIVED,
+       where the robot really is at the reversed path's start), but wrong
+       for a RECALLED-mid-route trip: the robot sits somewhere in the
+       MIDDLE of the reversed path there, not at either end, so the path's
+       fixed first-segment bearing points in a direction that doesn't
+       match where the robot actually is. Found live (a mid-route recall
+       self-check failed to arrive within its tick budget, sitting at
+       ~97% progress). Fixed by projecting from the robot's real current
+       position, same as `pure_pursuit_step` already does -- this is now
+       correct regardless of where along the path the robot happens to be.
+    """
+    status = sim.pull_status()
+    x, y = status.base.xy
+    s = nav._closest_arc_length(path, x, y)
+    look_x, look_y = nav._point_at_arc_length(path, s + lookahead_m)
+    return math.atan2(look_y - y, look_x - x)
+
+
 def _drive_home(sim, task, now, terminal_phase, drive_speed, arrival_tolerance_m):
     sim.close_door()  # idempotent ctrl target; covers a recall straight out of ARRIVED
     path = list(reversed(nav.path_for(task["room"])))
+    if not task["_leg_oriented"]:
+        # Rotate toward the reversed path first -- see _bearing_from_here()'s
+        # docstring. Projected from the robot's REAL current position, not
+        # the path's fixed start: a recall straight out of ARRIVED has the
+        # robot AT the reversed path's start, but a mid-route recall has it
+        # somewhere in the MIDDLE of the reversed path, and the two need
+        # different bearings.
+        if _rotate_toward(sim, _bearing_from_here(sim, path)):
+            task["_leg_oriented"] = True
+        return task, 1.0  # return trip hasn't started yet -- frac stays at "just left"
     # task["progress_m"] here is whatever stale value the outbound leg left
     # it at -- that's fine and needs no special handling. pure_pursuit_step
     # never reads the incoming progress_m for its computation (see its own
@@ -265,10 +323,21 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
             sim.close_door()
             task["phase"] = "EN_ROUTE"
             task["dispatched_at"] = now
+            task["_leg_oriented"] = False
         return task, 0.0
 
     if task["phase"] == "EN_ROUTE":
         path = nav.path_for(task["room"])
+        if not task["_leg_oriented"]:
+            # Rotate toward the path first -- see _bearing_from_here()'s
+            # docstring. A fresh EN_ROUTE dispatch always starts exactly at
+            # the path's first point, so this reduces to the same bearing
+            # every room's forward path already starts with (+x, same as
+            # CANONICAL_PARK_YAW_RAD) -- computed from the real path rather
+            # than assumed, so it stays correct if that ever changes.
+            if _rotate_toward(sim, _bearing_from_here(sim, path)):
+                task["_leg_oriented"] = True
+            return task, 0.0
         task["progress_m"], frac, done = nav.pure_pursuit_step(
             sim, path, task["progress_m"], drive_speed,
             arrival_tolerance_m=arrival_tolerance_m)
@@ -283,6 +352,7 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
         if confirmed:
             sim.close_door()
             task["phase"] = "RETURNING"
+            task["_leg_oriented"] = False
         return task, 1.0
 
     if task["phase"] == "RETURNING":
@@ -484,15 +554,15 @@ if __name__ == "__main__":
             assert tasks["t2"]["phase"] == "EN_ROUTE"
 
             i = 0
-            for i in range(4600):  # real margin over measured arrival (~3149 ticks).
-                                     # EN_ROUTE now starts facing DESK_FACE_YAW_RAD (the
-                                     # robot just turned to face the desk during
-                                     # COLLECTING), so it needs its own ~180-degree
-                                     # reversal before real progress starts, same
-                                     # slow-near-discontinuity convergence as every other
-                                     # wide U-turn in this codebase -- this is why the
-                                     # budget roughly quintupled from the pre-desk-facing
-                                     # measurement (~665-669 ticks)
+            for i in range(1000):  # real margin over measured arrival (~695-696 ticks).
+                                     # EN_ROUTE now pre-rotates (v=0) to face the path
+                                     # before driving (_leg_oriented gate, see
+                                     # _bearing_from_here()'s docstring) instead of
+                                     # correcting a ~180-degree error while already
+                                     # driving forward -- this is why the budget is back
+                                     # down near the original pre-desk-facing measurement
+                                     # (~665-669 ticks) despite COLLECTING's desk-facing
+                                     # turn adding a full reversal to correct
                 tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
@@ -508,13 +578,12 @@ if __name__ == "__main__":
             tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(), confirmed=True,
                                         drive_speed=speed, arrival_tolerance_m=tol_m)
             assert tasks["t1"]["phase"] == "RETURNING"
-            for i in range(3200):  # real margin over measured arrival (~2111-2225 ticks,
-                                     # including the PARKING settle-heading step).
-                                     # ARRIVED means facing INTO the room, so driving home
-                                     # needs the same kind of ~180-degree U-turn as a
-                                     # mid-route recall, plus the full 4m back through the
-                                     # corner -- much larger than a straight-line drive of
-                                     # the same distance would need
+            for i in range(1200):  # real margin over measured arrival (~805-808 ticks,
+                                     # including the pre-rotation and PARKING
+                                     # settle-heading steps). Same pre-rotate-then-drive
+                                     # pattern as EN_ROUTE above keeps this near the
+                                     # straight drive-home time despite the corner and the
+                                     # ~180-degree reversal ARRIVED leaves it facing
                 tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 if tasks["t1"]["phase"] == "DONE":
@@ -558,9 +627,12 @@ if __name__ == "__main__":
             assert tasks["t4"]["phase"] == "EN_ROUTE", tasks["t4"]
             _handle({"cmd": "recall", "task_id": "t4", "reason": "wrong room number"}, tasks)
             assert tasks["t4"]["phase"] == "RECALLED", tasks["t4"]
-            for i in range(2400):  # real margin over measured arrival (~1577 ticks, including
-                                     # PARKING) -- this is the scenario that used to stall
-                                     # forever before _settle_heading() existed
+            for i in range(500):  # real margin over measured arrival (~259 ticks). This is
+                                    # the scenario that used to stall forever before
+                                    # _settle_heading() existed, and later needed a wrong
+                                    # fixed-first-segment bearing fix before
+                                    # _bearing_from_here() (projected from the robot's
+                                    # real position) made it fast and correct
                 tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 if tasks["t4"]["phase"] == "AT_DESK":
@@ -573,9 +645,9 @@ if __name__ == "__main__":
             assert tasks["t2"]["phase"] == "ARRIVED"
             _handle({"cmd": "recall", "task_id": "t2", "reason": "guest not answering"}, tasks)
             assert tasks["t2"]["phase"] == "RETURNING", tasks["t2"]
-            for i in range(2400):  # real margin over measured arrival (~1565-1679 ticks,
-                                     # including PARKING) -- same ARRIVED-facing-in U-turn
-                                     # as t1 above, over 0803's shorter ~2m near-arm path
+            for i in range(600):  # real margin over measured arrival (~361 ticks) -- same
+                                    # ARRIVED-facing-in reversal as t1 above, over 0803's
+                                    # shorter ~2m near-arm path
                 tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
                 if tasks["t2"]["phase"] == "DONE":
