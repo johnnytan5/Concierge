@@ -3,7 +3,7 @@
 import React, { useEffect } from 'react';
 import { s } from '../lib/css';
 import { MONO, tag } from '../lib/ui';
-import { hhmmss, duration, roomFromCalls } from '../lib/format';
+import { hhmmss, duration, roomForCall } from '../lib/format';
 import CallFlow, { taskIdFrom } from './CallFlow';
 import CallDeliveries from './CallDeliveries';
 import type {
@@ -45,7 +45,7 @@ export default function CallModal({
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const room = roomFromCalls(calls);
+  const room = roomForCall(session, calls);
   const escalated = calls.some((c) => c.tool_name === 'escalate_to_frontdesk');
   const orphan = session.id === '__ungrouped__';
 

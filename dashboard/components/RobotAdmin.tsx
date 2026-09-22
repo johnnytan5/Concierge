@@ -9,12 +9,13 @@ import {
 import {
   PHASE_STEPS, STEP_HUMAN, phaseStep, humanPhase, TERMINAL_HUMAN, isTerminal,
   formatItems, hhmmss, duration, ago, formatPrice, medianDeskToDoor,
-  pickLiveSession, lastActivityBySession, roomFromCalls,
+  pickLiveSession, lastActivityBySession, roomForCall,
 } from '../lib/format';
 import { TOOL_HUMAN, CATS, TAGS } from '../lib/vocab';
 import { useAdminData, useAdminPassword } from '../lib/useAdminData';
 import * as api from '../lib/adminApi';
 import CallModal from './CallModal';
+import CallControl from './CallControl';
 import LiveCall from './LiveCall';
 import type { ToolCallRow, TranscriptRow, SessionRow } from '../lib/types';
 
@@ -530,15 +531,22 @@ export default function RobotAdmin(props: RobotAdminProps) {
                   : 'What the assistant is doing right now, as it happens'}
                 subStyle={subStyle}
               />
-              <LiveCall
-                sessions={d.sessions}
-                toolCalls={d.toolCalls}
-                transcripts={d.transcripts}
-                deliveries={d.deliveries}
-                robots={d.robots}
-                dev={dev}
-                now={d.now}
-              />
+              <div style={s('display:flex;flex-direction:column;gap:14px')}>
+                <CallControl
+                  password={password}
+                  onNeedsUnlock={() => setDialog('unlock')}
+                  dev={dev}
+                />
+                <LiveCall
+                  sessions={d.sessions}
+                  toolCalls={d.toolCalls}
+                  transcripts={d.transcripts}
+                  deliveries={d.deliveries}
+                  robots={d.robots}
+                  dev={dev}
+                  now={d.now}
+                />
+              </div>
             </div>
           )}
 
@@ -724,7 +732,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                   const orphan = g.session.id === '__ungrouped__';
                   const escalated = g.calls.some((c) => c.tool_name === 'escalate_to_frontdesk');
                   const guestFirst = g.turns.find((t) => t.role === 'guest');
-                  const room = roomFromCalls(g.calls);
+                  const room = roomForCall(g.session, g.calls);
                   const live = !g.session.ended_at && !orphan;
                   return (
                     <button

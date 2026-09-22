@@ -4,7 +4,7 @@ import React from 'react';
 import { s } from '../lib/css';
 import { MONO, HATCH, tag } from '../lib/ui';
 import {
-  pickLiveSession, lastActivityBySession, hhmmss, duration, roomFromCalls,
+  pickLiveSession, lastActivityBySession, hhmmss, duration, roomForCall,
 } from '../lib/format';
 import CallFlow, { taskIdFrom } from './CallFlow';
 import CallDeliveries from './CallDeliveries';
@@ -88,7 +88,7 @@ export default function LiveCall({
   const turns = transcripts.filter((t) => t.session_id === shown.id);
 
   // Room the guest is calling from, as last stated to a tool.
-  const room = roomFromCalls(calls);
+  const room = roomForCall(shown, calls);
 
   // What this call actually put on the floor.
   const taskIds = new Set(

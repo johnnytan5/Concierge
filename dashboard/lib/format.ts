@@ -172,6 +172,16 @@ export function pickLiveSession(
  * or `escalate_to_frontdesk`. Last one wins: on a call that amends the room
  * mid-flight, the later value is the one that matters.
  */
+export function roomForCall(
+  session: Pick<SessionRow, 'room'> | null | undefined,
+  calls: Array<{ arguments: Record<string, unknown> | null }>,
+): string | null {
+  // The switchboard's value wins. It is known before anyone speaks, whereas
+  // the derived one is whatever room happened to be passed to a tool — which
+  // is the right answer only when nobody told us up front.
+  return session?.room?.trim() || roomFromCalls(calls);
+}
+
 export function roomFromCalls(
   calls: Array<{ arguments: Record<string, unknown> | null }>,
 ): string | null {

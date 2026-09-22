@@ -20,7 +20,7 @@ export class AdminApiError extends Error {
 
 async function call<T>(
   path: string,
-  method: 'POST' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   password: string,
   body?: unknown,
 ): Promise<T> {
@@ -84,6 +84,29 @@ export const resolveEscalation = (id: string, password: string) =>
 
 export const reopenEscalation = (id: string, password: string) =>
   call(`/admin/escalations/${id}/reopen`, 'POST', password);
+
+/**
+ * The front-desk line. Starting a call launches orchestrator/agent.py on the
+ * machine running admin_api — it opens THAT machine's microphone, so the
+ * dashboard is the switchboard, not the handset.
+ */
+export type CallStatus = {
+  running: boolean;
+  room: string | null;
+  pid?: number;
+  started_at?: string;
+  exit_code?: number | null;
+  log?: string[];
+};
+
+export const startCall = (room: string | null, password: string) =>
+  call<CallStatus>('/admin/call/start', 'POST', password, { room });
+
+export const stopCall = (password: string) =>
+  call<CallStatus>('/admin/call/stop', 'POST', password);
+
+export const getCallStatus = (password: string) =>
+  call<CallStatus>('/admin/call/status', 'GET', password);
 
 /** Shown in dev view so an operator can see where writes are going. */
 export const adminApiBase = () => BASE;

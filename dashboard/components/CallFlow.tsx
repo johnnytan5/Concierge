@@ -4,7 +4,7 @@ import React from 'react';
 import { s } from '../lib/css';
 import { MONO, ALERT_CHIP } from '../lib/ui';
 import {
-  hhmmss, replyLatencyMs, latencyLabel, median, roomFromCalls, guestLabel, argPairsFor,
+  hhmmss, replyLatencyMs, latencyLabel, median, guestLabel, argPairsFor, roomForCall,
 } from '../lib/format';
 import { TOOL_HUMAN, TOOL_GROUP, ARG_HUMAN } from '../lib/vocab';
 import type { ToolCallRow, TranscriptRow, SessionRow } from '../lib/types';
@@ -184,7 +184,7 @@ export default function CallFlow({
   session, calls, turns, dev, variant = 'compact', hideFlow,
 }: Props) {
   const z = sizes(variant);
-  const room = roomFromCalls(calls);
+  const room = roomForCall(session, calls);
   const guest = guestLabel(room, dev);
 
   const entries: Entry[] = [

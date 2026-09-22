@@ -14,7 +14,7 @@ import {
   phaseStep, humanPhase, formatItems, duration, ago,
   formatPrice, median, medianDeskToDoor, isTerminal, PHASE_STEPS,
   pickLiveSession, replyLatencyMs, latencyLabel, roomFromCalls, guestLabel,
-  argPairsFor,
+  argPairsFor, roomForCall,
 } from './format.ts';
 
 test('phaseStep maps every engine phase onto a real step or none', () => {
@@ -113,7 +113,7 @@ test('isTerminal marks exactly the two end states', () => {
 });
 
 const sess = (id: string, started: string, ended: string | null = null) =>
-  ({ id, agent_id: null, started_at: started, ended_at: ended }) as never;
+  ({ id, agent_id: null, room: null, started_at: started, ended_at: ended }) as never;
 
 test('pickLiveSession takes the newest genuinely-active open session', () => {
   const now = Date.parse('2026-09-13T21:00:00Z');
@@ -207,6 +207,22 @@ test('argPairsFor drops empties rather than printing null', () => {
     { room: '1204', add: [], remove: null, reason: '' }, false, { room: 'Room' });
   assert.deepEqual(pairs, [{ k: 'Room', v: '1204' }]);
   assert.deepEqual(argPairsFor(null, false, {}), []);
+});
+
+test('roomForCall prefers the switchboard over the derived room', () => {
+  const withRoom = { room: '1204' };
+  const noRoom = { room: null };
+  const calls = [{ arguments: { room: '0803' } }];
+
+  // the PBX knew before anyone spoke — that wins over whatever a tool got
+  assert.equal(roomForCall(withRoom, calls), '1204');
+  // no caller ID: fall back to what the guest told a tool
+  assert.equal(roomForCall(noRoom, calls), '0803');
+  assert.equal(roomForCall(null, calls), '0803');
+  // neither
+  assert.equal(roomForCall(noRoom, []), null);
+  // a blank room on the session is not a room
+  assert.equal(roomForCall({ room: '  ' }, calls), '0803');
 });
 
 test('guestLabel names the room when we know it', () => {

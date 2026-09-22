@@ -47,6 +47,9 @@ export type ToolCallRow = {
 export type SessionRow = {
   id: string;
   agent_id: string | null;
+  /** Extension the call came in on, known at connect time the way a hotel
+   *  PBX hands reception the room. Null for a call with no caller ID. */
+  room: string | null;
   started_at: string;
   ended_at: string | null;
 };
