@@ -4,11 +4,19 @@ task_engine hold their own copies for their own writes, per Sub-project
 A). Every admin CRUD write and every robot-screen button press goes
 through here, since Sub-project A's RLS locks anon/authenticated out of
 writes entirely. Reads (dashboard, admin item list, robot screen status)
-go directly from the browser to Supabase via Realtime + the anon key —
-this app has no read/GET endpoints at all.
+go directly from the browser to Supabase via Realtime + the anon key.
+The only GET here is /admin/call/status, which reports on a local child
+process and therefore cannot come from the database.
 """
 import os
+import re
 import secrets
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -21,6 +29,15 @@ load_dotenv()
 
 ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ROBOT_IDS = ["robot_1", "robot_2"]
+
+# Repo root — admin_api/main.py lives one level down. The agent is launched
+# from here so its own load_dotenv() finds the same .env this process read.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# A room number is interpolated into a launch argument, so it is validated
+# rather than trusted. Never passed through a shell (Popen takes a list), but
+# a strict allowlist costs nothing and removes the question entirely.
+_ROOM_RE = re.compile(r"^[A-Za-z0-9-]{1,10}$")
 
 app = FastAPI()
 app.add_middleware(
@@ -167,3 +184,160 @@ def reopen_escalation(escalation_id: str):
     if not resp.data:
         raise HTTPException(status_code=404, detail="escalation not found")
     return resp.data[0]
+
+
+# ---------------------------------------------------------------------------
+# The front-desk line
+#
+# Starting a call means launching orchestrator/agent.py, which opens the mic
+# and holds the AssemblyAI WebSocket. That is a real child process, so this
+# section owns its lifecycle: one at a time (there is one microphone), a
+# graceful stop that lets the agent close its own session row, and a status
+# endpoint so the dashboard can show the right button.
+#
+# The room is passed through because a hotel PBX already knows which
+# extension is ringing — the assistant is told up front rather than asking.
+# ---------------------------------------------------------------------------
+
+_call_lock = threading.Lock()
+_call: dict | None = None   # {proc, room, started_at, log_path}
+
+
+def _call_is_running() -> bool:
+    """True only if we have a child AND it has not exited on its own (the
+    guest hanging up, or the agent erroring out)."""
+    return _call is not None and _call["proc"].poll() is None
+
+
+def _tail_log(path: str, lines: int = 12) -> list[str]:
+    try:
+        with open(path) as f:
+            return [ln.rstrip() for ln in f.readlines()[-lines:]]
+    except OSError:
+        return []
+
+
+def _call_status() -> dict:
+    if _call is None:
+        return {"running": False, "room": None}
+    exited = _call["proc"].poll()
+    return {
+        "running": exited is None,
+        "room": _call["room"],
+        "pid": _call["proc"].pid,
+        "started_at": _call["started_at"],
+        "exit_code": exited,
+        # The agent prints its session id, the connect handshake and any
+        # session.error here. Without it, "the call didn't start" is a
+        # dead end from the browser.
+        "log": _tail_log(_call["log_path"]),
+    }
+
+
+class CallStartIn(BaseModel):
+    room: str | None = None
+
+
+@app.post("/admin/call/start", dependencies=[Depends(require_admin_password)])
+def start_call(body: CallStartIn):
+    global _call
+    room = (body.room or "").strip() or None
+    if room is not None and not _ROOM_RE.match(room):
+        raise HTTPException(status_code=400, detail="room must be 1-10 letters/digits/hyphens")
+
+    with _call_lock:
+        if _call_is_running():
+            raise HTTPException(status_code=409,
+                                detail=f"a call is already on the line (room {_call['room']})")
+
+        # -u: unbuffered. Python buffers stdout when it is a file rather than
+        # a TTY, so without this the agent's connect confirmation and any
+        # session.error sit in a buffer until the process dies -- which is
+        # exactly when you no longer need them.
+        cmd = [sys.executable, "-u", "-m", "orchestrator.agent"]
+        if room:
+            cmd += ["--room", room]
+
+        log = tempfile.NamedTemporaryFile(
+            prefix="concierge-call-", suffix=".log", delete=False, mode="w")
+        try:
+            proc = subprocess.Popen(
+                cmd,                       # list, never a shell string
+                cwd=_REPO_ROOT,
+                stdout=log, stderr=subprocess.STDOUT,
+                # Own process group, so stopping the call signals the agent
+                # AND the task_engine child it spawned, not this server.
+                start_new_session=True,
+            )
+        except OSError as e:
+            log.close()
+            raise HTTPException(status_code=500, detail=f"could not start the agent: {e}")
+
+        _call = {"proc": proc, "room": room,
+                 "started_at": datetime.now(timezone.utc).isoformat(),
+                 "log_path": log.name}
+
+    # Give it a moment to fail loudly (missing key, no mic, bad agent config)
+    # rather than reporting success on a process that died immediately.
+    time.sleep(1.5)
+    status = _call_status()
+    if not status["running"]:
+        raise HTTPException(
+            status_code=500,
+            detail="the agent exited immediately: " + " / ".join(status["log"][-4:]))
+    return status
+
+
+@app.post("/admin/call/stop", dependencies=[Depends(require_admin_password)])
+def stop_call():
+    global _call
+    with _call_lock:
+        if not _call_is_running():
+            return {"running": False, "room": None, "note": "no call was on the line"}
+
+        proc = _call["proc"]
+        # SIGINT first: agent.py catches KeyboardInterrupt, which terminates
+        # the task engine and lets run_agent's finally close the voice_sessions
+        # row. Killing outright would leave the session open forever and the
+        # dashboard would keep calling it live.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except (ProcessLookupError, PermissionError):
+            proc.send_signal(signal.SIGINT)
+
+        killed = False
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.wait(timeout=5)
+            killed = True
+
+        # A SIGKILLed agent never ran its finally, so its voice_sessions row
+        # is still open and the dashboard would keep presenting a dead call as
+        # live. Close it here. Scoped to sessions that began at or after this
+        # call started, so it cannot touch an unrelated (or seeded) open row --
+        # and only one agent runs at a time, so that window holds exactly one.
+        if killed:
+            _close_sessions_since(_call["started_at"])
+
+        return _call_status()
+
+
+def _close_sessions_since(started_at: str) -> None:
+    try:
+        (_get_client().table("voice_sessions")
+         .update({"ended_at": datetime.now(timezone.utc).isoformat()})
+         .is_("ended_at", "null")
+         .gte("started_at", started_at)
+         .execute())
+    except Exception as e:  # noqa: BLE001 - never fail a hang-up over bookkeeping
+        print(f"[admin_api] could not close the session row after a forced stop: {e!r}")
+
+
+@app.get("/admin/call/status", dependencies=[Depends(require_admin_password)])
+def call_status():
+    return _call_status()
