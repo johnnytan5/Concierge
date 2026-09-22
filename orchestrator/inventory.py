@@ -146,7 +146,8 @@ def insert_escalation(reason: str, room: str | None):
     return asyncio.get_running_loop().run_in_executor(None, _do)
 
 
-def insert_voice_session(session_id: str, agent_id: str | None = None):
+def insert_voice_session(session_id: str, agent_id: str | None = None,
+                          room: str | None = None):
     """BLOCKING on purpose, and the only write in this module that is.
 
     tool_call_events.session_id and transcript_turns.session_id are both
@@ -157,9 +158,13 @@ def insert_voice_session(session_id: str, agent_id: str | None = None):
     the cost is paid where nothing is waiting on it. Let it raise: a
     session that cannot register is a session with no audit trail, and
     that should be loud at startup rather than silent for the whole call.
+
+    `room` is the extension the guest dialled from, known before they speak
+    the way a hotel PBX hands reception the room as the call rings. None
+    when the agent is launched without one.
     """
     _get_client().table("voice_sessions").insert(
-        {"id": session_id, "agent_id": agent_id}
+        {"id": session_id, "agent_id": agent_id, "room": room}
     ).execute()
 
 

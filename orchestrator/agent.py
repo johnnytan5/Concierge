@@ -53,6 +53,7 @@ Two more, verified against the live events-reference doc after the fact:
     `{"result": {"eta_seconds": 90}}`. This file had it wrong too; fixed
     by wrapping with `json.dumps()` before sending.
 """
+import argparse
 import asyncio
 import base64
 import json
@@ -89,7 +90,7 @@ LLM_MODEL = "qwen/qwen3.8-flash"  # cheap (~$0.5/M completion tokens vs. Claude'
 USE_BYO_LLM = True  # via OpenRouter (OPENROUTER_API_KEY in .env), not AssemblyAI's own
                      # gateway — that one has zero model access on this account
 
-SYSTEM_PROMPT = (
+_BASE_PROMPT = (
     "You are the front-desk voice assistant for a hotel. Guests and staff "
     "ask you to send items to rooms, check on deliveries already under way, "
     "or change/cancel one mid-flight. Use check_menu, dispatch_delivery, "
@@ -107,6 +108,30 @@ SYSTEM_PROMPT = (
     "harder for staff to act on."
 )
 
+
+def system_prompt_for(room: str | None) -> str:
+    """The prompt, with the caller's room baked in when we know it.
+
+    A hotel PBX tells reception which room is ringing before anyone speaks,
+    so the assistant should already know it — asking "what room are you in?"
+    when the switchboard just told you is exactly the tell that gives away a
+    scripted demo. When no room is supplied (the bare `python -m
+    orchestrator.agent` path) it falls back to asking, which is correct for
+    a call with no caller ID.
+    """
+    if not room:
+        return _BASE_PROMPT + (
+            " You do not know which room this call came from, so ask for it "
+            "before dispatching anything."
+        )
+    return _BASE_PROMPT + (
+        f" This call is coming from room {room} — the switchboard already "
+        f"identified it, so do NOT ask the guest which room they are in. Use "
+        f"{room} as the room for dispatch_delivery, check_delivery_status and "
+        f"escalate_to_frontdesk unless the guest explicitly asks for something "
+        f"to go to a different room."
+    )
+
 # Room numbers / dish names pulled straight from PLAN.md's scenarios (S1-S3) —
 # RQ2 is literally about how much this list helps WER on code-switched audio.
 KEYTERMS = ["1204", "0803", "towel", "toothbrush", "char kuey teow"]
@@ -122,7 +147,7 @@ def _redact(obj):
     return obj
 
 
-def agent_definition(api_key: str) -> dict:
+def agent_definition(api_key: str, room: str | None = None) -> dict:
     """Body for POST /v1/agents (stored agent). Required top-level fields
     per the live API: name, system_prompt, voice ({"voice_id": ...}) —
     NOT the same shape as session.update's inline config (there's no
@@ -157,12 +182,17 @@ def agent_definition(api_key: str) -> dict:
     """
     definition = {
         "name": "concierge-front-desk",
-        "system_prompt": SYSTEM_PROMPT,
+        "system_prompt": system_prompt_for(room),
         "voice": {"voice_id": "anna"},
-        "greeting": "Front desk, how can I help?",
+        # Reception answers a room extension already knowing who is calling.
+        "greeting": (f"Front desk, room {room} — how can I help?" if room
+                     else "Front desk, how can I help?"),
         "input": {
             "format": {"encoding": "audio/pcm"},
-            "keyterms": KEYTERMS,
+            # The caller's own room, biased for: they will say it back
+            # ("towels to twelve oh four"), and it is the single term most
+            # worth getting right on this call.
+            "keyterms": (KEYTERMS + [room]) if room and room not in KEYTERMS else KEYTERMS,
         },
         "tools": SESSION_TOOLS,
     }
@@ -175,19 +205,22 @@ def agent_definition(api_key: str) -> dict:
     return definition
 
 
-def ensure_agent(api_key: str, force_new: bool = False) -> str:
+def ensure_agent(api_key: str, force_new: bool = False, room: str | None = None) -> str:
     """Create a stored agent. Creates fresh by default — do not assume a
     previously created id still works (see module docstring's TTL note).
-    ASSEMBLYAI_AGENT_ID in the environment is honored as a manual
-    override for testing against one specific agent, unless force_new."""
-    if not force_new:
+
+    ASSEMBLYAI_AGENT_ID is honored as a manual override for testing against
+    one specific agent — but NOT when a room is supplied, since the room is
+    baked into the stored agent's prompt, greeting and keyterms, and reusing
+    an agent built for a different room would answer with the wrong one."""
+    if not force_new and not room:
         existing = os.environ.get("ASSEMBLYAI_AGENT_ID")
         if existing:
             return existing
 
     req = urllib.request.Request(
         AGENTS_URL,
-        data=json.dumps(agent_definition(api_key)).encode(),
+        data=json.dumps(agent_definition(api_key, room)).encode(),
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -336,13 +369,16 @@ async def start_inventory():
     return asyncio.create_task(inventory.start_refresh_loop())
 
 
-async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str):
+async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str,
+                     room: str | None = None):
     """Connects, self-healing once if the stored agent has vanished (see
-    ensure_agent's docstring / module docstring's TTL note)."""
+    ensure_agent's docstring / module docstring's TTL note).
+
+    `room` is the extension this call came in on, if the switchboard knew it."""
     headers = {"Authorization": f"Bearer {api_key}"}
     loop = asyncio.get_running_loop()
     refresh_task = await start_inventory()  # before the session opens — see start_inventory
-    agent_id = ensure_agent(api_key)
+    agent_id = ensure_agent(api_key, room=room)
     registered = False
 
     try:
@@ -354,7 +390,7 @@ async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str):
                 if first.get("type") in ("error", "session.error"):
                     if first.get("code") == "agent_not_found" and attempt == 1:
                         print("stored agent vanished before connect — creating a fresh one and retrying once")
-                        agent_id = ensure_agent(api_key, force_new=True)
+                        agent_id = ensure_agent(api_key, force_new=True, room=room)
                         continue
                     raise RuntimeError(f"session error: {first}")
 
@@ -367,9 +403,10 @@ async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str):
                 # every one of those writes is fire-and-forget — the parent
                 # has to exist first. See inventory.insert_voice_session.
                 await loop.run_in_executor(None, inventory.insert_voice_session,
-                                            session_id, agent_id)
+                                            session_id, agent_id, room)
                 registered = True
-                print(f"voice session {session_id} registered (agent {agent_id})")
+                print(f"voice session {session_id} registered "
+                      f"(agent {agent_id}, room {room or 'unknown'})")
 
                 await _run_session(ws, handlers, first, session_id)
                 return
@@ -379,7 +416,7 @@ async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str):
             await loop.run_in_executor(None, inventory.end_voice_session, session_id)
 
 
-def main():
+def main(room: str | None = None):
     api_key = os.environ["ASSEMBLYAI_API_KEY"]
     # One id per run = one "call" in the admin dashboard's Call log. Same
     # short-hex shape as task_id, for consistency in the UI.
@@ -394,7 +431,7 @@ def main():
 
     handlers = ToolHandlers(cmd_queue, state, session_id=session_id)
     try:
-        asyncio.run(run_agent(handlers, api_key, session_id))
+        asyncio.run(run_agent(handlers, api_key, session_id, room))
     except KeyboardInterrupt:
         pass
     finally:
@@ -402,4 +439,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(
+        description="Front-desk voice agent. Talk into the mic; Ctrl-C to hang up.")
+    ap.add_argument(
+        "--room",
+        help="Extension the call came in on. A hotel PBX knows this before "
+             "the guest speaks, so the assistant is told it up front and will "
+             "not ask. Omit for a call with no caller ID.")
+    main(ap.parse_args().room)
