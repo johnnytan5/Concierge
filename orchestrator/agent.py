@@ -61,6 +61,9 @@ import multiprocessing as mp
 import os
 import urllib.error
 import urllib.request
+import sys
+import threading
+import time
 import uuid
 
 import numpy as np
@@ -69,7 +72,7 @@ import websockets
 from dotenv import load_dotenv
 
 from orchestrator import inventory
-from orchestrator.tools import SESSION_TOOLS, ToolHandlers
+from orchestrator.tools import SESSION_TOOLS, ToolHandlers, needs_nudge
 from task_engine.engine import run as run_task_engine
 
 load_dotenv()
@@ -84,34 +87,96 @@ SAMPLE_RATE = 24_000
 # confirmed live 2026-09-11: both a plain completion and OpenAI-style
 # tool-calling tested directly against it, standalone, before wiring in.
 LLM_BASE_URL = "https://openrouter.ai/api/v1"
-LLM_MODEL = "qwen/qwen3.8-flash"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
+# "@preset/concierge" is an OpenRouter preset (openrouter.ai/settings/presets)
+# that sets reasoning.enabled=false. AssemblyAI's llm block only passes
+# base_url/model/api_key, so the model string is the one place that switch
+# can ride along. Without it qwen3.8 thinks silently for 3-8s before every
+# tool call (100-275 hidden tokens) and the guest hears dead air; with it,
+# first token ~1s and it says "let me check" on its own. Measured
+# 2026-09-23. /no_think and chat_template_kwargs do NOT work via OpenRouter.
+LLM_MODEL = "qwen/qwen3.8-flash@preset/concierge"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
                                     # live 2026-09-11: correct tool-calling on a multi-item
                                     # dispatch_delivery request, standalone against OpenRouter
 USE_BYO_LLM = True  # via OpenRouter (OPENROUTER_API_KEY in .env), not AssemblyAI's own
                      # gateway — that one has zero model access on this account
 
 _BASE_PROMPT = (
-    "You are the front-desk voice assistant for a hotel. Guests and staff "
-    "ask you to send items to rooms, check on deliveries already under way, "
-    "or change/cancel one mid-flight. Use check_menu, dispatch_delivery, "
-    "check_delivery_status, amend_delivery, recall_robot, get_fleet_state "
-    "and announce_arrival for anything involving the delivery robots or "
-    "what the hotel offers — never claim a delivery is done, in progress, "
-    "or arrived unless a tool told you so first. "
-    "Use check_menu before quoting a price or confirming a food order; if "
-    "an item carries dietary tags, ask the guest about the relevant "
-    "preference before confirming. "
-    "For general questions — check-in/out times, late checkout policy, "
-    "which floor a facility is on and its hours, wifi, breakfast, parking, "
+    "You are the front-desk voice assistant for a hotel, speaking on the "
+    "phone. Guests and staff ask you to send items to rooms, check on "
+    "deliveries already under way, change or cancel one mid-flight, or ask "
+    "general questions about the hotel.\n\n"
+    "LANGUAGE: guests may speak Chinese, Malay or mixed languages. Always "
+    "reply in English — the voice can only speak English — but show you "
+    "understood by naming what they asked for. In every tool call, use the "
+    "exact English item names from the MENU (e.g. 毛巾 -> towel).\n\n"
+    "HOW TO SPEAK: keep every reply to one or two short sentences. Never "
+    "read out the menu or a list longer than two items. Only talk about "
+    "items the guest actually asked for. Before calling any tool, say one "
+    "brief phrase first, such as 'One moment, let me check that.' That "
+    "phrase and the tool call MUST be in the same reply: never announce an "
+    "action ('let me pass that on', 'let me check') and end your turn "
+    "without actually calling the tool — the guest would wait in silence "
+    "until they speak again.\n\n"
+    "ITEM REQUESTS: the MENU below is what the delivery robot can bring "
+    "right now. Before you agree to send anything, check every requested "
+    "item against it. Never say you will send an item that is not on it, "
+    "and never confirm an order before you know each item is available. "
+    "If an item is not on the MENU, say plainly that the hotel does not "
+    "have it and offer at most two close alternatives from the MENU. Do "
+    "NOT escalate an unavailable item to the front desk — there is nothing "
+    "for them to do. Call check_menu only if the guest asks about an item "
+    "you cannot find below or wants to double-check stock.\n\n"
+    "DISPATCHING: once the guest confirms, call dispatch_delivery with only "
+    "the available items. Then tell the guest exactly what the result says "
+    "was sent, and anything listed as unavailable — never claim more was "
+    "sent than dispatched_items. Never claim a delivery is done, in "
+    "progress, or arrived unless a tool told you so. Use check_delivery_status, "
+    "amend_delivery, recall_robot, get_fleet_state and announce_arrival for "
+    "deliveries already under way. Dietary tags are for answering the "
+    "guest's own dietary questions — bring them up only if the guest "
+    "mentions a dietary need, and never state an ingredient the MENU does "
+    "not list. When the guest says yes or 'send it', dispatch right away "
+    "without further questions.\n\n"
+    "GENERAL QUESTIONS: check-in/out times, late checkout policy, which "
+    "floor a facility is on and its hours, wifi, breakfast, parking, "
     "laundry — call hotel_info and answer only from what it returns; never "
-    "guess a time, price or floor. "
-    "Anything that needs a person to act — actually granting a late "
-    "checkout, a lost card, billing, complaints, or a question hotel_info "
-    "has no answer for — call escalate_to_frontdesk, and pass "
-    "the guest's room number as `room` whenever you know it: the front-desk "
-    "dashboard lists escalations by room, and one without a room is much "
-    "harder for staff to act on."
+    "guess a time, price or floor. For any late check-out question, give "
+    "the guest the policy and its cost first, then offer to request it.\n\n"
+    "ESCALATION: call escalate_to_frontdesk only when a person has to act: "
+    "actually granting a late checkout, a lost key card, billing, something "
+    "broken in the room, a complaint, or a question hotel_info has no "
+    "answer for. Pass the guest's room number as `room` whenever you know "
+    "it.\n\n"
+    "Anything you escalate is a REQUEST, not a result: say the front desk "
+    "will confirm it — never say it is confirmed, approved or arranged. "
+    "Only escalate after the guest has said yes, and escalate each request "
+    "once.\n\n"
+    "Quote prices, times and limits exactly as hotel_info states them; do "
+    "not paraphrase them into something vaguer. Never repeat information "
+    "you have already told the guest in this call.\n\n"
+    "After finishing a request, ask briefly if there is anything else. "
+    "When the guest says goodbye, that's all, or asks to end the call, "
+    "call end_call."
 )
+
+
+def menu_for_prompt(items: list[dict]) -> str:
+    """The live menu as compact prompt lines, snapshotted at call start.
+
+    Putting it here means an ordinary order needs no check_menu round trip
+    before the assistant can answer — each tool round trip is a full extra
+    LLM turn of silence for the guest. Stock can still move mid-call;
+    dispatch_delivery re-checks it live and reports what it couldn't send.
+    Only sellable items are listed, so the model has nothing unavailable
+    to promise."""
+    lines = []
+    for it in sorted(items, key=lambda i: (i.get("category") or "", i["name"])):
+        if not (it.get("available") and it.get("in_stock")):
+            continue
+        price = f" ${float(it['price']):.2f}" if it.get("price") else " (complimentary)"
+        tags = f" [{', '.join(it['dietary_tags'])}]" if it.get("dietary_tags") else ""
+        lines.append(f"- {it['name']} ({it.get('category')}){price}{tags}")
+    return "MENU (available now):\n" + ("\n".join(lines) or "- nothing available")
 
 
 def system_prompt_for(room: str | None) -> str:
@@ -124,13 +189,14 @@ def system_prompt_for(room: str | None) -> str:
     orchestrator.agent` path) it falls back to asking, which is correct for
     a call with no caller ID.
     """
+    base = _BASE_PROMPT + "\n\n" + menu_for_prompt(inventory.all_items()) + "\n\n"
     if not room:
-        return _BASE_PROMPT + (
-            " You do not know which room this call came from, so ask for it "
+        return base + (
+            "You do not know which room this call came from, so ask for it "
             "before dispatching anything."
         )
-    return _BASE_PROMPT + (
-        f" This call is coming from room {room} — the switchboard already "
+    return base + (
+        f"This call is coming from room {room} — the switchboard already "
         f"identified it, so do NOT ask the guest which room they are in. Use "
         f"{room} as the room for dispatch_delivery, check_delivery_status and "
         f"escalate_to_frontdesk unless the guest explicitly asks for something "
@@ -253,10 +319,6 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
     ready = asyncio.Event()
     loop = asyncio.get_running_loop()
     mic_q: asyncio.Queue = asyncio.Queue()
-    # ponytail: one flat pending-results list, not per-turn tracking —
-    # fine for our scenarios (one tool call in flight at a time); revisit
-    # if a turn ever fires two overlapping tool calls before reply.done.
-    pending_results = []
 
     def on_mic(indata, *_frames_time_status):
         if ready.is_set():
@@ -274,13 +336,51 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
         ready.set()
         print("session ready — talk into the mic")
 
+    # Which mic, in the call log: macOS silently makes AirPods the default
+    # input when they connect, and a mic sitting in its case looks exactly
+    # like "the agent isn't transcribing me".
+    print(f"mic: {sd.query_devices(kind='input')['name']} | "
+          f"speaker: {sd.query_devices(kind='output')['name']}")
+    # Playback is callback-driven off a byte buffer. It used to be a blocking
+    # speaker.write() inside this loop, which froze the loop for the length
+    # of every reply: the mic pump starved (guest speech reached AssemblyAI
+    # seconds late), events queued up, and one long reply outlasted the WS
+    # keepalive and killed the call. Barge-in is now just clearing the buffer.
+    play_buf = bytearray()
+    play_lock = threading.Lock()
+
+    def on_speaker(outdata, frames, _time, _status):
+        n = len(outdata)
+        with play_lock:
+            chunk = bytes(play_buf[:n])
+            del play_buf[:n]
+        outdata[:len(chunk)] = chunk
+        outdata[len(chunk):] = b"\x00" * (n - len(chunk))
+
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
                          callback=on_mic), \
-         sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as speaker:
+         sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                            callback=on_speaker,
+                            # "low" (the default) means a few-ms buffer; on
+                            # Bluetooth, any moment the GIL is busy decoding
+                            # an event starves it and the voice stutters.
+                            latency="high"):
         mic_task = asyncio.create_task(pump_mic())
         audio_chunk_count = 0  # debug: reply.audio was completely invisible before
         audio_byte_total = 0
         audio_peak_max = 0
+        # Per-reply bookkeeping for the announced-but-never-called nudge,
+        # keyed by reply_id. The final transcript.agent for a reply can land
+        # AFTER that reply's reply.done, so attributing text by arrival order
+        # glued one reply's "let me check" onto the next reply; the deltas
+        # carry reply_id and always precede their reply.done.
+        current_reply: str | None = None
+        reply_texts: dict[str, list[str]] = {}
+        replies_with_tool: set[str] = set()
+        guest_speaking = False
+        nudged_this_turn = False
+        ending = False           # end_call was called; close after the goodbye
+        force_close = None
         try:
             async for raw in ws:
                 ev = json.loads(raw)
@@ -304,16 +404,42 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
                     peak = int(np.abs(samples).max()) if len(samples) else 0
                     audio_peak_max = max(audio_peak_max, peak)  # debug: distinguishes real
                                                                   # speech from near-silent padding
-                    speaker.write(samples)
+                    with play_lock:
+                        play_buf.extend(raw_bytes)
+
+                elif etype == "reply.started":
+                    current_reply = ev.get("reply_id")
+
+                elif etype == "transcript.agent.delta":
+                    reply_texts.setdefault(ev.get("reply_id") or current_reply, []).append(ev.get("delta", ""))
+
+                elif etype == "input.speech.started":
+                    guest_speaking = True
+
+                elif etype == "input.speech.stopped":
+                    guest_speaking = False
 
                 elif etype == "tool.call":
+                    replies_with_tool.add(ev.get("reply_id") or current_reply)
                     print(f"tool.call: {ev.get('name')}({ev.get('arguments')})")  # debug
                     try:
                         result = handlers.dispatch(ev["name"], ev["arguments"])
                     except Exception as e:  # don't let a handler bug silently kill the loop
                         print(f"tool handler raised: {e!r}")
                         result = {"error": str(e)}
-                    pending_results.append((ev["call_id"], result))
+                    if ev["name"] == "end_call" and not ending:
+                        ending = True
+                        # Backstop: if no goodbye reply ever comes, still hang up.
+                        force_close = asyncio.create_task(_close_after(ws, 12))
+                    # Every tool is declared execution_mode "hold" (see
+                    # tools.SESSION_TOOLS): the result goes back the moment
+                    # the handler returns and auto-fires the spoken follow-up.
+                    await ws.send(json.dumps({
+                        "type": "tool.result",
+                        "call_id": ev["call_id"],
+                        "result": json.dumps(result),  # JSON-encoded STRING,
+                                                        # verified live 2026-09-07
+                    }))
 
                 elif etype == "reply.done":
                     print(f"reply.done: status={ev.get('status')!r} audio_chunks={audio_chunk_count} "
@@ -322,24 +448,43 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
                     audio_chunk_count = 0
                     audio_byte_total = 0
                     audio_peak_max = 0
+                    rid = ev.get("reply_id") or current_reply
+                    said = "".join(reply_texts.pop(rid, []))
+                    if ending and (rid not in replies_with_tool or said.strip()):
+                        # The goodbye is done: either the reply that carried
+                        # end_call already said it (close now -- otherwise the
+                        # auto-fired follow-up says a SECOND goodbye), or this
+                        # is that follow-up. Let it finish playing, then close.
+                        for _ in range(150):
+                            with play_lock:
+                                if not play_buf:
+                                    break
+                            await asyncio.sleep(0.1)
+                        print("CALL_ENDED by end_call")
+                        break
                     if ev.get("status") == "interrupted":
-                        speaker.abort()
-                        speaker.start()
-                        pending_results.clear()  # discard stale results, per docs
-                    else:
-                        for call_id, result in pending_results:
-                            await ws.send(json.dumps({
-                                "type": "tool.result",
-                                "call_id": call_id,
-                                "result": json.dumps(result),  # result is a JSON-encoded
-                                                                # STRING, not a raw object —
-                                                                # verified live 2026-09-07
-                            }))
-                        pending_results.clear()
+                        with play_lock:
+                            play_buf.clear()  # barge-in: stop talking now
+                    elif (rid not in replies_with_tool and not nudged_this_turn
+                          and not guest_speaking and needs_nudge(said)):
+                        # The model promised an action ("let me pass that on")
+                        # and ended its turn without the tool call. Left alone
+                        # the guest waits until they speak again. One nudge per
+                        # guest turn so a stubborn model can't loop.
+                        nudged_this_turn = True
+                        print("nudge: reply announced an action without a tool call")
+                        await ws.send(json.dumps({
+                            "type": "reply.create",
+                            "instructions": "You just told the guest you would do something "
+                                            "but did not call the tool. Call the right tool now. "
+                                            "Do not repeat what you already said.",
+                        }))
 
                 elif etype in ("transcript.user", "transcript.agent"):
                     role = "guest" if etype == "transcript.user" else "agent"
                     text = ev.get("text", "")
+                    if role == "guest":
+                        nudged_this_turn = False
                     print(f"{role}: {text}")
                     # Empty transcripts do arrive (partials, barge-in); a
                     # blank row would just be noise in the Call log, and the
@@ -353,7 +498,48 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
                     print(f"(unhandled) {etype}: {ev}")
         finally:
             mic_task.cancel()
-            await ws.send(json.dumps({"type": "Terminate"}))
+            if force_close:
+                force_close.cancel()
+            try:
+                await ws.send(json.dumps({"type": "session.end"}))
+            except websockets.exceptions.ConnectionClosed:
+                pass  # already closed (the end_call backstop, or the server)
+
+
+async def _close_after(ws, seconds: float):
+    await asyncio.sleep(seconds)
+    print("CALL_ENDED by end_call (no goodbye reply arrived)")
+    await ws.close()
+
+
+# Terminal task phases — a delivery in any other phase is still on the floor.
+_DONE_PHASES = ("DONE", "AT_DESK")
+
+
+def wait_for_robot(state, limit_s: int = 600):
+    """After the guest hangs up, keep the task engine alive until the robot
+    finishes. The engine (and the MuJoCo sims inside it) lives in this
+    process, so exiting straight away froze the robot mid-corridor the
+    moment the guest said goodbye. Capped: a bin nobody ever loads would
+    otherwise hold the process forever."""
+    announced = False
+    for _ in range(limit_s):
+        tasks = dict(state.get("tasks") or {})
+        active = [t for t in tasks.values() if t.get("phase") not in _DONE_PHASES]
+        if not active:
+            # ponytail: fixed grace, not a handshake with the engine. It
+            # mirrors to Supabase only every 5th tick (~1s) plus the write
+            # itself, so exiting the instant the task hits DONE left the
+            # dashboard showing "heading back" forever. 3s = two mirror
+            # rounds of margin.
+            time.sleep(3)
+            print("robot idle — exiting")
+            return
+        if not announced:
+            print(f"call over; robot finishing {len(active)} task(s)")
+            announced = True
+        time.sleep(1)
+    print("gave up waiting for the robot after the time limit")
 
 
 async def start_inventory():
@@ -382,8 +568,15 @@ async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str,
     `room` is the extension this call came in on, if the switchboard knew it."""
     headers = {"Authorization": f"Bearer {api_key}"}
     loop = asyncio.get_running_loop()
-    refresh_task = await start_inventory()  # before the session opens — see start_inventory
-    agent_id = ensure_agent(api_key, room=room)
+    # The session row is inserted in parallel with the WS connect rather than
+    # after it (serial startup cost ~8s before the greeting). It must exist
+    # before the first transcript write, so it is awaited before _run_session.
+    # The prompt embeds the live menu, so the inventory must be primed
+    # before the agent is created; the session row still overlaps the connect.
+    refresh_task = await start_inventory()
+    agent_id = await loop.run_in_executor(None, lambda: ensure_agent(api_key, room=room))
+    reg_task = loop.run_in_executor(None, inventory.insert_voice_session,
+                                    session_id, agent_id, room)
     registered = False
 
     try:
@@ -399,16 +592,11 @@ async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str,
                         continue
                     raise RuntimeError(f"session error: {first}")
 
-                # Register the call only now that the connection is real:
-                # a failed first attempt shouldn't leave a phantom row, and
-                # agent_id here is the one that actually worked rather than
-                # the one we first tried. Blocking (via executor, never on
-                # the loop) because tool_call_events.session_id and
-                # transcript_turns.session_id are real FKs onto this row and
-                # every one of those writes is fire-and-forget — the parent
-                # has to exist first. See inventory.insert_voice_session.
-                await loop.run_in_executor(None, inventory.insert_voice_session,
-                                            session_id, agent_id, room)
+                # The row was inserted in parallel with the connect (FKs from
+                # tool_call_events / transcript_turns need it first). If the
+                # stored agent had to be recreated, its agent_id column holds
+                # the first id tried — cosmetic, and that path is rare.
+                await reg_task
                 registered = True
                 print(f"voice session {session_id} registered "
                       f"(agent {agent_id}, room {room or 'unknown'})")
@@ -417,11 +605,13 @@ async def run_agent(handlers: ToolHandlers, api_key: str, session_id: str,
                 return
     finally:
         refresh_task.cancel()
-        if registered:
+        # The row is inserted before the connect is known to work, so close
+        # it whenever the insert landed — not only when the session ran.
+        if registered or (reg_task.done() and not reg_task.exception()):
             await loop.run_in_executor(None, inventory.end_voice_session, session_id)
 
 
-def main(room: str | None = None):
+def main(room: str | None = None, viewer: bool = False):
     api_key = os.environ["ASSEMBLYAI_API_KEY"]
     # One id per run = one "call" in the admin dashboard's Call log. Same
     # short-hex shape as task_id, for consistency in the UI.
@@ -431,12 +621,27 @@ def main(room: str | None = None):
     manager = mp.Manager()
     state = manager.dict()
 
-    engine_proc = mp.Process(target=run_task_engine, args=(cmd_queue, state), daemon=True)
+    viewer_robot = None
+    if viewer:
+        # MuJoCo's viewer needs the Cocoa main thread on macOS, which only
+        # mjpython provides. The engine's main thread is its own, so spawning
+        # just that process under mjpython is enough; this one (the asyncio
+        # WS loop) stays plain python and never touches MuJoCo (constraint 1).
+        mjpython = os.path.join(os.path.dirname(sys.executable), "mjpython")
+        if sys.platform == "darwin" and os.path.exists(mjpython):
+            mp.set_executable(mjpython)
+        viewer_robot = "robot_1"  # ROBOT_IDS[0]: gets the first dispatch
+    engine_proc = mp.Process(target=run_task_engine, args=(cmd_queue, state, viewer_robot),
+                             daemon=True)
     engine_proc.start()
+    if viewer:
+        mp.set_executable(sys.executable)
 
     handlers = ToolHandlers(cmd_queue, state, session_id=session_id)
     try:
         asyncio.run(run_agent(handlers, api_key, session_id, room))
+        if handlers.end_requested:
+            wait_for_robot(state)
     except KeyboardInterrupt:
         pass
     finally:
@@ -451,4 +656,9 @@ if __name__ == "__main__":
         help="Extension the call came in on. A hotel PBX knows this before "
              "the guest speaks, so the assistant is told it up front and will "
              "not ask. Omit for a call with no caller ID.")
-    main(ap.parse_args().room)
+    ap.add_argument(
+        "--viewer", action="store_true",
+        help="Open the MuJoCo viewer on robot_1's live sim (the one this call "
+             "drives), for a split-screen demo next to the dashboard.")
+    args = ap.parse_args()
+    main(args.room, viewer=args.viewer)

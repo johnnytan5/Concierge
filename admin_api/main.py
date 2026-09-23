@@ -207,10 +207,26 @@ _call_lock = threading.Lock()
 _call: dict | None = None   # {proc, room, started_at, log_path}
 
 
-def _call_is_running() -> bool:
-    """True only if we have a child AND it has not exited on its own (the
-    guest hanging up, or the agent erroring out)."""
+def _proc_alive() -> bool:
     return _call is not None and _call["proc"].poll() is None
+
+
+def _guest_hung_up() -> bool:
+    """The agent prints CALL_ENDED when the guest said goodbye (end_call).
+    It then stays alive until the robot finishes its deliveries -- the
+    engine and sims live in that process -- so "process alive" no longer
+    means "someone is on the line"."""
+    try:
+        with open(_call["log_path"]) as f:
+            return "CALL_ENDED" in f.read()
+    except (OSError, TypeError):
+        return False
+
+
+def _call_is_running() -> bool:
+    """True only while a guest is actually on the line: the child is alive
+    and has not hung up via end_call."""
+    return _proc_alive() and not _guest_hung_up()
 
 
 def _tail_log(path: str, lines: int = 12) -> list[str]:
@@ -225,8 +241,11 @@ def _call_status() -> dict:
     if _call is None:
         return {"running": False, "room": None}
     exited = _call["proc"].poll()
+    hung_up = _guest_hung_up()
     return {
-        "running": exited is None,
+        "running": exited is None and not hung_up,
+        # Call over, process still alive only so the robot can finish.
+        "finishing": exited is None and hung_up,
         "room": _call["room"],
         "pid": _call["proc"].pid,
         "started_at": _call["started_at"],
@@ -253,6 +272,11 @@ def start_call(body: CallStartIn):
         if _call_is_running():
             raise HTTPException(status_code=409,
                                 detail=f"a call is already on the line (room {_call['room']})")
+        if _proc_alive():
+            # The last guest hung up and the robot is still finishing. A new
+            # call brings its own engine, so retire the old one first --
+            # two engines would each drive their own copy of the fleet.
+            _stop_proc(_call["proc"])
 
         # -u: unbuffered. Python buffers stdout when it is a file rather than
         # a TTY, so without this the agent's connect confirmation and any
@@ -261,6 +285,10 @@ def start_call(body: CallStartIn):
         cmd = [sys.executable, "-u", "-m", "orchestrator.agent"]
         if room:
             cmd += ["--room", room]
+        # Split-screen demo: the call's own robot sim in a MuJoCo window.
+        # CONCIERGE_VIEWER=0 in .env turns it off.
+        if os.environ.get("CONCIERGE_VIEWER", "1") != "0":
+            cmd += ["--viewer"]
 
         log = tempfile.NamedTemporaryFile(
             prefix="concierge-call-", suffix=".log", delete=False, mode="w")
@@ -296,29 +324,9 @@ def start_call(body: CallStartIn):
 def stop_call():
     global _call
     with _call_lock:
-        if not _call_is_running():
+        if not _proc_alive():
             return {"running": False, "room": None, "note": "no call was on the line"}
-
-        proc = _call["proc"]
-        # SIGINT first: agent.py catches KeyboardInterrupt, which terminates
-        # the task engine and lets run_agent's finally close the voice_sessions
-        # row. Killing outright would leave the session open forever and the
-        # dashboard would keep calling it live.
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-        except (ProcessLookupError, PermissionError):
-            proc.send_signal(signal.SIGINT)
-
-        killed = False
-        try:
-            proc.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-            proc.wait(timeout=5)
-            killed = True
+        killed = _stop_proc(_call["proc"])
 
         # A SIGKILLed agent never ran its finally, so its voice_sessions row
         # is still open and the dashboard would keep presenting a dead call as
@@ -329,6 +337,27 @@ def stop_call():
             _close_sessions_since(_call["started_at"])
 
         return _call_status()
+
+
+def _stop_proc(proc) -> bool:
+    """SIGINT first: agent.py catches KeyboardInterrupt, which terminates
+    the task engine and lets run_agent's finally close the voice_sessions
+    row. Killing outright would leave the session open forever and the
+    dashboard would keep calling it live. Returns True if it had to SIGKILL."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+    except (ProcessLookupError, PermissionError):
+        proc.send_signal(signal.SIGINT)
+    try:
+        proc.wait(timeout=8)
+        return False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait(timeout=5)
+        return True
 
 
 def _close_sessions_since(started_at: str) -> None:

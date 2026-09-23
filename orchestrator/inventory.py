@@ -126,13 +126,16 @@ def decrement_stock(item_names: list[str], task_id: str | None = None,
 
 def insert_delivery(task: dict):
     def _do():
-        _get_client().table("deliveries").insert({
+        _get_client().table("deliveries").upsert({
             "task_id": task["task_id"],
             "room": task["room"],
             "items": task["items"],
             "phase": task["phase"],
             "priority": task["priority"],
-        }).execute()
+        # task_engine upserts the same row as soon as it dequeues the task,
+        # and usually wins the race; a plain insert then failed with 23505.
+        # Its row is newer, so a duplicate here is simply skipped.
+        }, on_conflict="task_id", ignore_duplicates=True).execute()
     # returns the Future so a test can await it; production ignores it
     return asyncio.get_running_loop().run_in_executor(None, _do)
 

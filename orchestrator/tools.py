@@ -4,6 +4,7 @@ handler either puts one command on task_engine's cmd_queue or reads its
 shared `state` dict, and returns immediately — never waits on the robot
 (CLAUDE.md constraint 2).
 """
+import re
 import time
 import uuid
 from collections import Counter
@@ -130,6 +131,9 @@ def _summarize(name: str, a: dict, r) -> str:
             return "No answer on file for that — should go to the front desk."
         return f"Answered a question about {str(a.get('topic', '')).replace('_', ' ')}."
 
+    if name == "end_call":
+        return "Call ended."
+
     if name == "escalate_to_frontdesk":
         room = a.get("room")
         where = f" from room {room}" if room else ""
@@ -233,8 +237,14 @@ SESSION_TOOLS = [
     },
     {
         "type": "function",
+        "name": "end_call",
+        "description": "Hang up the phone. Call this only when the guest says goodbye or asks to end the call, and only after every request in the call is handled. Say your short goodbye in the same reply as this call; the line closes right after.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "type": "function",
         "name": "escalate_to_frontdesk",
-        "description": "Route a non-delivery request (late checkout, lost card, billing, etc.) to a human front-desk staff member.",
+        "description": "Hand something to a human front-desk staff member when a person has to act: granting a late checkout, lost key card, billing, something broken, a complaint. Never for an item that is unavailable or not on the menu — tell the guest instead.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -245,6 +255,47 @@ SESSION_TOOLS = [
         },
     },
 ]
+
+# "hold", not the default "interactive": interactive makes the agent say a
+# filler line and only accepts tool.result after that reply is done. With
+# BYO-LLM the filler came back as 5-9s of silence, so every tool call cost
+# that much dead air plus a follow-up that often never came. Every handler
+# here returns in <100ms (CLAUDE.md constraint 2), so there is nothing to
+# fill: hold takes the result immediately and auto-fires the reply.
+for _t in SESSION_TOOLS:
+    _t["execution_mode"] = "hold"
+    _t["timeout_seconds"] = 10
+
+
+# A spoken promise of an action ("let me pass that on", "one moment") in a
+# reply that carried no tool call. Measured 2026-09-23: 2-6 of 16 replies do
+# this whatever the prompt says, and then nothing happens until the guest
+# speaks again (37s of silence on a real call). The agent nudges once when
+# it sees one. Deliberately narrow: "let me know if..." must not match.
+_ANNOUNCE = re.compile(
+    r"\b(one moment|just a moment|give me a (sec|second|moment)|"
+    r"let me (check|look|pass|send|see|get|put|find|arrange|sort|request|note|flag|confirm)|"
+    r"i'?ll (check|look|pass|send|put|get|find|arrange|request|flag|confirm|have)|"
+    r"checking (on|that|now)|passing (that|this|it))\b", re.I)
+
+
+def announces_action(text: str) -> bool:
+    return bool(_ANNOUNCE.search(text or ""))
+
+
+def needs_nudge(reply_text: str) -> bool:
+    """True only when a reply ENDS on a promised action and asks nothing.
+
+    A reply that asks the guest something ("Want me to put that request
+    in?") is waiting for them, and nudging it made the model act without a
+    yes -- on a real call it escalated a late checkout unasked, told the
+    guest it was "confirmed", and escalated again. So: no question mark
+    anywhere, and the announcement must be the last sentence."""
+    text = (reply_text or "").strip()
+    if not text or "?" in text:
+        return False
+    last = re.split(r"(?<=[.!])\s+", text)[-1]
+    return announces_action(last)
 
 
 class ToolHandlers:
@@ -262,6 +313,8 @@ class ToolHandlers:
         self._q = cmd_queue
         self._state = state
         self._session_id = session_id
+        # Set by end_call; agent.py closes the line once the goodbye plays.
+        self.end_requested = False
 
     def check_menu(self, items=None):
         if items:
@@ -379,6 +432,10 @@ class ToolHandlers:
         if answer is None:
             return {"error": "unknown_topic", "topics": list(HOTEL_FACTS)}
         return {"topic": topic, "answer": answer}
+
+    def end_call(self):
+        self.end_requested = True
+        return {"ack": True, "instruction": "The line is closing and you have already said goodbye. Say nothing more."}
 
     def escalate_to_frontdesk(self, reason, room=None):
         # `room` was hardcoded None here until the admin dashboard needed
@@ -587,10 +644,22 @@ if __name__ == "__main__":
             == "Couldn't do that: unknown_tool:x."
 
         info = h.dispatch("hotel_info", {"topic": "late_checkout"})
-        assert "2pm" in info["answer"], info
+        assert "$30" in info["answer"] and "5pm" in info["answer"], info
         assert h.hotel_info("spa")["error"] == "unknown_topic"
         assert summarize_result("hotel_info", {"topic": "late_checkout"}, info) \
             == "Answered a question about late checkout."
+
+        # the filler-without-a-tool-call detector
+        assert announces_action("One moment, let me pass that to the front desk.")
+        assert announces_action("I'll check our checkout policy for you right away.")
+        assert not announces_action("Let me know if you need anything else!")
+        assert not announces_action("Your towel is on the way. Anything else?")
+        assert needs_nudge("One moment, let me pass that to the front desk.")
+        assert not needs_nudge("Let me check our policy. 3pm is $90. Want me to request it?")
+        assert not needs_nudge("One moment, let me check. Your towel is on the way.")
+
+        assert h.dispatch("end_call", {})["ack"] is True and h.end_requested
+        assert summarize_result("end_call", {}, {"ack": True}) == "Call ended."
 
         print("tools self-check OK")
 
