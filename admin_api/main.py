@@ -7,10 +7,21 @@ writes entirely. Reads (dashboard, admin item list, robot screen status)
 go directly from the browser to Supabase via Realtime + the anon key.
 The only GET here is /admin/call/status, which reports on a local child
 process and therefore cannot come from the database.
+
+No auth. There used to be a shared-password header on the /admin/* routes;
+it was removed deliberately, because this runs on the operator's own laptop
+for a demo and the unlock step bought nothing but friction mid-take. What
+guards it instead is reachability: uvicorn binds 127.0.0.1, so nothing off
+the machine can reach it, and CORS is pinned to the dashboard's own origin
+so a browser tab on an unrelated site cannot either.
+
+That trade is fine for a laptop demo and NOT fine if this is ever exposed —
+this process holds the Supabase service-role key, which bypasses RLS
+entirely, and /admin/call/start spawns a process that opens the microphone.
+Put real auth back before it listens on anything but loopback.
 """
 import os
 import re
-import secrets
 import signal
 import subprocess
 import sys
@@ -20,14 +31,13 @@ import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 
 load_dotenv()
 
-ADMIN_PASSWORD = os.environ["ADMIN_PASSWORD"]
 ROBOT_IDS = ["robot_1", "robot_2"]
 
 # Repo root — admin_api/main.py lives one level down. The agent is launched
@@ -40,9 +50,19 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ROOM_RE = re.compile(r"^[A-Za-z0-9-]{1,10}$")
 
 app = FastAPI()
+# Named origins rather than "*", because there is no password on these
+# endpoints any more (removed deliberately — see the module docstring).
+# Uvicorn binds 127.0.0.1, so this is not reachable over the network; the
+# remaining caller to think about is a browser tab on some unrelated site.
+# Every write here takes a JSON body, which forces a CORS preflight, and a
+# foreign origin fails that. Without this, any page you happened to be
+# visiting could POST /admin/call/start and open your microphone.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # hackathon demo scope, see spec's Auth section
+    allow_origins=[
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",  # next's fallback port
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -57,21 +77,6 @@ def _get_client() -> Client:
             os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"]
         )
     return _client
-
-
-def require_admin_password(x_admin_password: str | None = Header(default=None)):
-    """Optional header, not a required one: `Header(...)` makes FastAPI reject
-    a missing header as a 422 validation error before this function runs, so
-    "no credentials" and "malformed request" became indistinguishable to the
-    caller. The dashboard keys off 401 to re-prompt for the password, and a
-    422 there surfaces as a raw validation message instead.
-
-    compare_digest keeps the check constant-time. This is a shared password,
-    not real auth (see the admin-dashboard design spec), but leaking its
-    length or prefix through timing is free to avoid.
-    """
-    if x_admin_password is None or not secrets.compare_digest(x_admin_password, ADMIN_PASSWORD):
-        raise HTTPException(status_code=401, detail="wrong or missing admin password")
 
 
 class ItemIn(BaseModel):
@@ -92,13 +97,13 @@ class ItemPatch(BaseModel):
     stock_count: int | None = None
 
 
-@app.post("/admin/items", dependencies=[Depends(require_admin_password)])
+@app.post("/admin/items")
 def create_item(item: ItemIn):
     resp = _get_client().table("inventory_items").insert(item.model_dump()).execute()
     return resp.data[0]
 
 
-@app.patch("/admin/items/{item_id}", dependencies=[Depends(require_admin_password)])
+@app.patch("/admin/items/{item_id}")
 def update_item(item_id: str, patch: ItemPatch):
     fields = {k: v for k, v in patch.model_dump().items() if v is not None}
     resp = _get_client().table("inventory_items").update(fields).eq("id", item_id).execute()
@@ -107,7 +112,7 @@ def update_item(item_id: str, patch: ItemPatch):
     return resp.data[0]
 
 
-@app.delete("/admin/items/{item_id}", dependencies=[Depends(require_admin_password)])
+@app.delete("/admin/items/{item_id}")
 def delete_item(item_id: str):
     _get_client().table("inventory_items").delete().eq("id", item_id).execute()
     return {"ack": True}
@@ -137,13 +142,14 @@ class RecallIn(BaseModel):
     reason: str
 
 
-@app.post("/admin/robots/{robot_id}/recall", dependencies=[Depends(require_admin_password)])
+@app.post("/admin/robots/{robot_id}/recall")
 def recall_robot(robot_id: str, body: RecallIn):
     """Admin-initiated recall from the dashboard's Fleet tab.
 
-    Password-gated, unlike the two /robot/* endpoints above — those are the
-    robot's own kiosk screen confirming a human action at the machine, this
-    is an operator reaching across the floor to pull a robot off its run.
+    Distinct from the two /robot/* endpoints above in intent, though no
+    longer in access: those are the robot's own kiosk screen confirming a
+    human action at the machine, this is an operator reaching across the
+    floor to pull a robot off its run.
 
     Returns immediately: the task engine picks the row up on its next
     Supabase poll (~1s) and resolves robot -> current task itself. A recall
@@ -159,8 +165,7 @@ def recall_robot(robot_id: str, body: RecallIn):
     return {"ack": True}
 
 
-@app.post("/admin/escalations/{escalation_id}/resolve",
-          dependencies=[Depends(require_admin_password)])
+@app.post("/admin/escalations/{escalation_id}/resolve")
 def resolve_escalation(escalation_id: str):
     resp = (_get_client().table("frontdesk_escalations")
             .update({"status": "resolved",
@@ -172,8 +177,7 @@ def resolve_escalation(escalation_id: str):
     return resp.data[0]
 
 
-@app.post("/admin/escalations/{escalation_id}/reopen",
-          dependencies=[Depends(require_admin_password)])
+@app.post("/admin/escalations/{escalation_id}/reopen")
 def reopen_escalation(escalation_id: str):
     """Undo for the above. Resolving is one click on a live floor; without
     a way back, a misclick buries a guest problem permanently."""
@@ -238,7 +242,7 @@ class CallStartIn(BaseModel):
     room: str | None = None
 
 
-@app.post("/admin/call/start", dependencies=[Depends(require_admin_password)])
+@app.post("/admin/call/start")
 def start_call(body: CallStartIn):
     global _call
     room = (body.room or "").strip() or None
@@ -288,7 +292,7 @@ def start_call(body: CallStartIn):
     return status
 
 
-@app.post("/admin/call/stop", dependencies=[Depends(require_admin_password)])
+@app.post("/admin/call/stop")
 def stop_call():
     global _call
     with _call_lock:
@@ -338,6 +342,6 @@ def _close_sessions_since(started_at: str) -> None:
         print(f"[admin_api] could not close the session row after a forced stop: {e!r}")
 
 
-@app.get("/admin/call/status", dependencies=[Depends(require_admin_password)])
+@app.get("/admin/call/status")
 def call_status():
     return _call_status()

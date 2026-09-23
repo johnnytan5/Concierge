@@ -12,7 +12,7 @@ import {
   pickLiveSession, lastActivityBySession, roomForCall,
 } from '../lib/format';
 import { TOOL_HUMAN, CATS, TAGS } from '../lib/vocab';
-import { useAdminData, useAdminPassword } from '../lib/useAdminData';
+import { useAdminData } from '../lib/useAdminData';
 import * as api from '../lib/adminApi';
 import CallModal from './CallModal';
 import CallControl from './CallControl';
@@ -32,7 +32,7 @@ export type RobotAdminProps = {
 };
 
 type Tab = 'live' | 'fleet' | 'deliveries' | 'calls' | 'escalations' | 'inventory';
-type Dialog = null | 'recall' | 'item' | 'delete' | 'unlock';
+type Dialog = null | 'recall' | 'item' | 'delete';
 
 /**
  * Working copy behind whichever dialog is open. One shape with optional
@@ -59,7 +59,6 @@ export default function RobotAdmin(props: RobotAdminProps) {
   } = props;
 
   const d = useAdminData();
-  const { password, unlocked, unlock, lock } = useAdminPassword();
 
   const [tab, setTab] = useState<Tab>(initialTab);
   const [delFilter, setDelFilter] = useState('All');
@@ -72,50 +71,39 @@ export default function RobotAdmin(props: RobotAdminProps) {
   const [devOverride, setDevOverride] = useState<boolean | undefined>(undefined);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  /** Set when a write was attempted while locked, so unlocking can resume it. */
-  const [pendingAfterUnlock, setPendingAfterUnlock] = useState<null | (() => void)>(null);
-  const [pwInput, setPwInput] = useState('');
 
   const dev = devOverride !== undefined ? devOverride : props.devMode === true;
   const ready = d.dataState === 'ready';
   const side = navLayout === 'sidebar';
 
-  const closeDialog = () => { setDialog(null); setDraft(null); setPwInput(''); };
+  const closeDialog = () => { setDialog(null); setDraft(null); };
   const oid = (id: string | null) =>
     !id ? '—' : dev ? id : 'Order ' + String(id).replace(/^tsk_/, '').toUpperCase();
 
   /**
-   * Every write funnels through here. Writes need the admin password; if the
-   * screen is locked, the action is parked and replayed once the operator
-   * unlocks, so a click is never silently swallowed.
+   * Every write funnels through here. admin_api has no auth any more (see its
+   * module docstring); this just carries the busy/error/refresh plumbing that
+   * every action needs.
    */
-  const guarded = (fn: (pw: string) => Promise<unknown>) => () => {
-    if (!password) {
-      setPendingAfterUnlock(() => () => void run(fn));
-      setDialog('unlock');
-      return;
-    }
-    void run(fn);
-  };
+  const guarded = (fn: () => Promise<unknown>) => () => { void run(fn); };
 
-  const run = async (fn: (pw: string) => Promise<unknown>) => {
-    const pw = window.sessionStorage.getItem('concierge.adminPassword');
-    if (!pw) { setDialog('unlock'); return; }
+  const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setActionError(null);
     try {
-      await fn(pw);
+      await fn();
       closeDialog();
       d.refetchAll(); // realtime covers this, but don't make the operator wait on it
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
-      // A rejected password is worth clearing, so the next write re-prompts
-      // instead of silently failing again with the same wrong value.
-      if (e instanceof api.AdminApiError && e.status === 401) lock();
     } finally {
       setBusy(false);
     }
   };
+
+  /** Alias kept for the robot's own kiosk confirmations, which read better
+   *  named for what they are rather than sharing `run`'s name. */
+  const runOpen = run;
 
   // ---------------------------------------------------------------- fleet
   const robotVMs = d.robots.map((r) => {
@@ -189,6 +177,15 @@ export default function RobotAdmin(props: RobotAdminProps) {
       itemsText: formatItems(task?.items),
       recallDisabled: !moving || busy,
       onRecall: () => { setActionError(null); setDialog('recall'); setDraft({ id: r.id, reason: '' }); },
+      // The robot's own kiosk confirmation, surfaced here because there is no
+      // separate robot screen. COLLECTING is a hard gate: the FSM will not
+      // leave the desk until a human says the bin is loaded, and ARRIVED will
+      // not release the robot until the guest says they took it.
+      kioskAction: r.phase === 'COLLECTING'
+        ? { label: dev ? 'complete_loading' : 'Bin loaded — send it', fn: () => api.completeLoading(r.id) }
+        : r.phase === 'ARRIVED'
+          ? { label: dev ? 'complete_collection' : 'Guest collected it', fn: () => api.completeCollection(r.id) }
+          : null,
     };
   });
 
@@ -391,22 +388,22 @@ export default function RobotAdmin(props: RobotAdminProps) {
 
   const subStyle = 'font-size:11px;color:var(--color-neutral-700)' + (dev ? ';font-family:' + MONO : '');
 
-  const saveItem = guarded(async (pw) => {
+  const saveItem = guarded(async () => {
     if (!itemPayload) return;
     // An id means editing an existing row; without one this is a new item.
-    if (draft?.id) await api.updateItem(draft.id, itemPayload, pw);
-    else await api.createItem(itemPayload, pw);
+    if (draft?.id) await api.updateItem(draft.id, itemPayload);
+    else await api.createItem(itemPayload);
   });
 
-  const confirmDelete = guarded(async (pw) => {
+  const confirmDelete = guarded(async () => {
     if (!draft?.id) return;
-    await api.deleteItem(draft.id, pw);
+    await api.deleteItem(draft.id);
   });
 
-  const confirmRecall = guarded(async (pw) => {
+  const confirmRecall = guarded(async () => {
     if (!draft?.id) return;
     await api.recallRobot(
-      draft.id, draft.reason?.trim() || 'Recalled from the admin dashboard', pw);
+      draft.id, draft.reason?.trim() || 'Recalled from the admin dashboard');
   });
 
   const conn = {
@@ -444,9 +441,6 @@ export default function RobotAdmin(props: RobotAdminProps) {
             </span>
           </div>
           {dev && <span className="tag tag-neutral" style={s('font-family:' + MONO)}>{api.adminApiBase()}</span>}
-          <button onClick={() => (unlocked ? lock() : setDialog('unlock'))} style={s(chip(unlocked))}>
-            {unlocked ? 'Unlocked' : 'Locked'}
-          </button>
           <button onClick={() => setDevOverride(!dev)} style={s(chip(dev))}>
             {dev ? 'Dev view' : 'Staff view'}
           </button>
@@ -532,11 +526,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                 subStyle={subStyle}
               />
               <div style={s('display:flex;flex-direction:column;gap:14px')}>
-                <CallControl
-                  password={password}
-                  onNeedsUnlock={() => setDialog('unlock')}
-                  dev={dev}
-                />
+                <CallControl dev={dev} />
                 <LiveCall
                   sessions={d.sessions}
                   toolCalls={d.toolCalls}
@@ -629,6 +619,15 @@ export default function RobotAdmin(props: RobotAdminProps) {
                     </div>
 
                     <div style={s('display:flex;gap:8px;align-items:center')}>
+                      {r.kioskAction && (
+                        <button
+                          onClick={() => void runOpen(() => r.kioskAction!.fn())}
+                          disabled={busy}
+                          style={s(PRIMARY_BTN)}
+                        >
+                          {r.kioskAction.label}
+                        </button>
+                      )}
                       <button className="btn btn-secondary" onClick={r.onRecall} disabled={r.recallDisabled}>Recall this robot</button>
                       {dev && <span style={s('font-size:10px;color:var(--color-neutral-700);letter-spacing:.04em;font-family:' + MONO)}>POST /admin/robots/{r.key}/recall</span>}
                     </div>
@@ -829,9 +828,9 @@ export default function RobotAdmin(props: RobotAdminProps) {
                         <button
                           className="btn btn-secondary"
                           disabled={busy}
-                          onClick={guarded((pw) => isOpen
-                            ? api.resolveEscalation(x.id, pw)
-                            : api.reopenEscalation(x.id, pw))}
+                          onClick={guarded(() => isOpen
+                            ? api.resolveEscalation(x.id)
+                            : api.reopenEscalation(x.id))}
                         >
                           {isOpen ? 'Resolve' : 'Reopen'}
                         </button>
@@ -993,33 +992,6 @@ export default function RobotAdmin(props: RobotAdminProps) {
         );
       })()}
 
-      {dialog === 'unlock' && (
-        <div className="dialog-backdrop">
-          <div className="dialog">
-            <div className="dialog-title">Unlock writes</div>
-            <div className="dialog-body">
-              Adding, editing and deleting items, recalling a robot and resolving an
-              escalation all need the admin password. It is kept for this browser tab only.
-            </div>
-            <div className="field">
-              <label>{dev ? 'X-Admin-Password' : 'Admin password'}</label>
-              <input
-                className="input"
-                type="password"
-                autoFocus
-                value={pwInput}
-                onChange={(e) => setPwInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && pwInput) submitUnlock(); }}
-              />
-            </div>
-            <div className="dialog-actions">
-              <button className="btn btn-secondary" onClick={() => { closeDialog(); setPendingAfterUnlock(null); }}>Cancel</button>
-              <button onClick={submitUnlock} disabled={!pwInput} style={s(PRIMARY_BTN)}>Unlock</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {dialog === 'recall' && draft && (
         <div className="dialog-backdrop">
           <div className="dialog">
@@ -1145,18 +1117,6 @@ export default function RobotAdmin(props: RobotAdminProps) {
       )}
     </div>
   );
-
-  function submitUnlock() {
-    if (!pwInput) return;
-    unlock(pwInput);
-    setPwInput('');
-    const resume = pendingAfterUnlock;
-    setPendingAfterUnlock(null);
-    setDialog(null);
-    // Replay whatever the operator clicked before being prompted. The write
-    // re-reads the password from sessionStorage, which unlock() just set.
-    if (resume) resume();
-  }
 }
 
 function SectionHead({ title, sub, subStyle }: { title: string; sub: string; subStyle: string }) {

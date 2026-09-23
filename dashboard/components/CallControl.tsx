@@ -20,14 +20,12 @@ import * as api from '../lib/adminApi';
  */
 
 type Props = {
-  password: string | null;
-  onNeedsUnlock: () => void;
   dev: boolean;
 };
 
 const POLL_MS = 3000;
 
-export default function CallControl({ password, onNeedsUnlock, dev }: Props) {
+export default function CallControl({ dev }: Props) {
   const [room, setRoom] = useState('1204');
   const [status, setStatus] = useState<api.CallStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -36,15 +34,14 @@ export default function CallControl({ password, onNeedsUnlock, dev }: Props) {
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
-    if (!password) return;
     try {
-      const st = await api.getCallStatus(password);
+      const st = await api.getCallStatus();
       if (mounted.current) setStatus(st);
     } catch {
       // A dead admin_api is reported by the action buttons; polling should
       // not paint an error banner on its own every 3 seconds.
     }
-  }, [password]);
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -59,12 +56,11 @@ export default function CallControl({ password, onNeedsUnlock, dev }: Props) {
     return () => { mounted.current = false; clearInterval(id); };
   }, [refresh]);
 
-  const run = async (fn: (pw: string) => Promise<api.CallStatus>) => {
-    if (!password) { onNeedsUnlock(); return; }
+  const run = async (fn: () => Promise<api.CallStatus>) => {
     setBusy(true);
     setError(null);
     try {
-      setStatus(await fn(password));
+      setStatus(await fn());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -93,12 +89,12 @@ export default function CallControl({ password, onNeedsUnlock, dev }: Props) {
                 className="input"
                 value={room}
                 onChange={(e) => setRoom(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && roomOk && !busy) void run((pw) => api.startCall(room.trim(), pw)); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && roomOk && !busy) void run(() => api.startCall(room.trim())); }}
                 style={s('width:110px;font-family:' + MONO + ';font-size:17px;font-weight:700;text-align:center')}
               />
             </label>
             <button
-              onClick={() => void run((pw) => api.startCall(room.trim() || null, pw))}
+              onClick={() => void run(() => api.startCall(room.trim() || null))}
               disabled={busy || !roomOk}
               style={s(PRIMARY_BTN)}
             >
@@ -127,7 +123,7 @@ export default function CallControl({ password, onNeedsUnlock, dev }: Props) {
               </span>
             )}
             <button
-              onClick={() => void run((pw) => api.stopCall(pw))}
+              onClick={() => void run(() => api.stopCall())}
               disabled={busy}
               className="btn btn-secondary"
             >

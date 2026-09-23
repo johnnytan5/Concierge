@@ -1,8 +1,12 @@
 /**
  * Write path. Reads go straight from the browser to Supabase with the anon
  * key (RLS allows select, nothing else); every write goes through admin_api,
- * which holds the service-role key server-side and gates on a shared
- * password header. The service-role key must never reach this bundle.
+ * which holds the service-role key server-side. The service-role key must
+ * never reach this bundle.
+ *
+ * No auth header: admin_api dropped its shared password deliberately (see its
+ * module docstring). It is guarded by reachability instead — loopback-only,
+ * with CORS pinned to this origin.
  */
 
 const BASE =
@@ -21,17 +25,13 @@ export class AdminApiError extends Error {
 async function call<T>(
   path: string,
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
-  password: string,
   body?: unknown,
 ): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Admin-Password': password,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -40,9 +40,6 @@ async function call<T>(
     throw new AdminApiError(0, `Cannot reach admin_api at ${BASE}. Is it running?`);
   }
 
-  if (res.status === 401) {
-    throw new AdminApiError(401, 'Wrong admin password.');
-  }
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -67,23 +64,39 @@ export type ItemPayload = {
   stock_count: number | null;
 };
 
-export const createItem = (p: ItemPayload, password: string) =>
-  call('/admin/items', 'POST', password, p);
+export const createItem = (p: ItemPayload) =>
+  call('/admin/items', 'POST', p);
 
-export const updateItem = (id: string, p: Partial<ItemPayload>, password: string) =>
-  call(`/admin/items/${id}`, 'PATCH', password, p);
+export const updateItem = (id: string, p: Partial<ItemPayload>) =>
+  call(`/admin/items/${id}`, 'PATCH', p);
 
-export const deleteItem = (id: string, password: string) =>
-  call(`/admin/items/${id}`, 'DELETE', password);
+export const deleteItem = (id: string) =>
+  call(`/admin/items/${id}`, 'DELETE');
 
-export const recallRobot = (robotId: string, reason: string, password: string) =>
-  call(`/admin/robots/${robotId}/recall`, 'POST', password, { reason });
+export const recallRobot = (robotId: string, reason: string) =>
+  call(`/admin/robots/${robotId}/recall`, 'POST', { reason });
 
-export const resolveEscalation = (id: string, password: string) =>
-  call(`/admin/escalations/${id}/resolve`, 'POST', password);
+/**
+ * The robot's own kiosk buttons, collapsed onto the fleet card.
+ *
+ * These mirror the two physical confirmations a person makes standing at the
+ * machine: "I've loaded the bin" and "I've taken my order". admin_api exposes
+ * them under /robot/* rather than /admin/* to keep that distinction legible.
+ *
+ * Without these the delivery FSM has no way out of COLLECTING, so the robot
+ * never leaves the desk.
+ */
+export const completeLoading = (robotId: string) =>
+  call(`/robot/${robotId}/complete_loading`, 'POST');
 
-export const reopenEscalation = (id: string, password: string) =>
-  call(`/admin/escalations/${id}/reopen`, 'POST', password);
+export const completeCollection = (robotId: string) =>
+  call(`/robot/${robotId}/complete_collection`, 'POST');
+
+export const resolveEscalation = (id: string) =>
+  call(`/admin/escalations/${id}/resolve`, 'POST');
+
+export const reopenEscalation = (id: string) =>
+  call(`/admin/escalations/${id}/reopen`, 'POST');
 
 /**
  * The front-desk line. Starting a call launches orchestrator/agent.py on the
@@ -99,14 +112,14 @@ export type CallStatus = {
   log?: string[];
 };
 
-export const startCall = (room: string | null, password: string) =>
-  call<CallStatus>('/admin/call/start', 'POST', password, { room });
+export const startCall = (room: string | null) =>
+  call<CallStatus>('/admin/call/start', 'POST', { room });
 
-export const stopCall = (password: string) =>
-  call<CallStatus>('/admin/call/stop', 'POST', password);
+export const stopCall = () =>
+  call<CallStatus>('/admin/call/stop', 'POST');
 
-export const getCallStatus = (password: string) =>
-  call<CallStatus>('/admin/call/status', 'GET', password);
+export const getCallStatus = () =>
+  call<CallStatus>('/admin/call/status', 'GET');
 
 /** Shown in dev view so an operator can see where writes are going. */
 export const adminApiBase = () => BASE;
