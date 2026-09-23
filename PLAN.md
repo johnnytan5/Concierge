@@ -176,6 +176,35 @@ Return `tool.result` when `reply.done` is the latest event you have received, pe
 
 You asked for a research plan, so treat these as small experiments with recorded results. They double as writeup content and as groundwork for the master's-level work you are considering.
 
+> **Status, decided Day 22 — RQ1 and RQ2 are CUT from the hackathon submission.**
+> Not deferred: cut. Zero of the 30 utterances were ever recorded
+> (`audio_tests/recordings/` is empty), and the reason they existed has expired.
+>
+> RQ1 was scoped as a **Day 1-3 gate** — "if code-switching WER is unusable,
+> pivot the language angle while you still can." That decision point is weeks
+> past; the language angle is built and working. What remained was a WER
+> benchmark of **AssemblyAI's own STT**, presented to judges who built it. That
+> measures the sponsor's product, not this one, and it carries a real tail risk:
+> mediocre numbers become published evidence against their tech at their own
+> event.
+>
+> The system-robustness question worth asking is the inverse, and it is already
+> answered in code: **what does this system do when transcription is wrong?**
+> `dispatch_delivery` validates the room against `nav.known_rooms()` before
+> touching stock, so a misheard "twelve oh four" fails safe with the reachable
+> room list rather than sending a robot to the wrong floor and silently
+> decrementing inventory. That is a property of this backend, it is
+> demonstrable in ~20 seconds, and no stub-JSON submission has it.
+>
+> Code-switching evidence now comes from S3 executing live on camera, not from
+> a chart. `audio_tests/scripts/rq1_utterances.md` stays in the repo as a
+> written test set — the Manglish corpus is genuinely rare and has value for
+> the Macau/master's track. Record it when that track needs it, not for this.
+>
+> RQ3 (tool round-trip latency) is **not** cut — it ships measured, as the
+> latency badges on every tool call and agent turn in the admin dashboard's
+> Call log and Live call tabs.
+
 **RQ1 — Does Universal-3 Pro handle intra-utterance code-switching?**
 Build a 30-utterance test set: 10 clean English, 10 Manglish with Malay/Mandarin switches, 10 with lobby noise. Transcribe, hand-label ground truth, compute WER per bucket. Answer this in the first three days — if it fails badly, you need to know while you can still change direction.
 
