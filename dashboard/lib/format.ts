@@ -219,6 +219,8 @@ export function argPairsFor(
       v = dev ? raw.join(', ') : formatItems(raw.map(String));
     } else if (!dev && (k === 'task_id') && typeof raw === 'string') {
       v = 'Order ' + raw.replace(/^tsk_/, '').toUpperCase();
+    } else if (!dev && k === 'topic' && typeof raw === 'string') {
+      v = raw.replace(/_/g, ' ');   // hotel_info topic: late_checkout -> late checkout
     } else {
       v = String(raw);
     }

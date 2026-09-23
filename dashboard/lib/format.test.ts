@@ -182,6 +182,13 @@ test('roomFromCalls takes the last room any tool was given', () => {
   assert.equal(roomFromCalls([{ arguments: { room: '   ' } }]), null);
 });
 
+test('argPairsFor reads a hotel_info topic as words for staff', () => {
+  assert.deepEqual(argPairsFor({ topic: 'late_checkout' }, false, { topic: 'Topic' }),
+    [{ k: 'Topic', v: 'late checkout' }]);
+  assert.deepEqual(argPairsFor({ topic: 'late_checkout' }, true, { topic: 'Topic' }),
+    [{ k: 'topic', v: 'late_checkout' }]);
+});
+
 test('argPairsFor keeps staff view free of machine detail', () => {
   const human = { room: 'Room', items: 'Items', task_id: 'Order', priority: 'Priority' };
   const args = { room: '1204', items: ['towel', 'towel'], priority: 'normal', task_id: 'tsk_4d33' };

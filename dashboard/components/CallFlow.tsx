@@ -230,6 +230,8 @@ export default function CallFlow({
                 lit={(groupCounts.get('menu') ?? 0) > 0} count={groupCounts.get('menu')} />
               <Node z={z} label={dev ? 'dispatch / amend / recall' : 'Order handling'}
                 lit={(groupCounts.get('dispatch') ?? 0) > 0} count={groupCounts.get('dispatch')} />
+              <Node z={z} label={dev ? 'hotel_info' : 'General inquiry'}
+                lit={(groupCounts.get('info') ?? 0) > 0} count={groupCounts.get('info')} />
               <Node z={z} label={dev ? 'escalate_to_frontdesk' : 'Escalated to desk'}
                 lit={escalated} count={groupCounts.get('escalate')} alert />
             </Column>
@@ -240,7 +242,9 @@ export default function CallFlow({
                   <Node key={t} z={z} label={dev ? t : 'Order ' + t.toUpperCase()} lit />
                 ))
               ) : (
-                <Node z={z} label={dev ? 'no task created' : 'No order placed'} lit={false} />
+                (groupCounts.get('info') ?? 0) > 0
+                  ? <Node z={z} label={dev ? 'answered, no task' : 'Question answered'} lit />
+                  : <Node z={z} label={dev ? 'no task created' : 'No order placed'} lit={false} />
               )}
             </Column>
           </div>

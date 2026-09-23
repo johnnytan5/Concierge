@@ -1,4 +1,4 @@
-"""Process 1 tool schema + handlers — eight client-side function tools per
+"""Process 1 tool schema + handlers — client-side function tools per
 CLAUDE.md's tool table (plus check_menu and escalate_to_frontdesk). Every
 handler either puts one command on task_engine's cmd_queue or reads its
 shared `state` dict, and returns immediately — never waits on the robot
@@ -9,6 +9,7 @@ import uuid
 from collections import Counter
 
 from orchestrator import inventory
+from orchestrator.hotel_facts import HOTEL_FACTS
 from task_engine import nav
 from task_engine.engine import eta_seconds_for
 
@@ -124,6 +125,11 @@ def _summarize(name: str, a: dict, r) -> str:
             return "Nothing to announce for that room."
         return f"Announced arrival at room {a.get('room', '?')}."
 
+    if name == "hotel_info":
+        if r.get("error"):
+            return "No answer on file for that — should go to the front desk."
+        return f"Answered a question about {str(a.get('topic', '')).replace('_', ' ')}."
+
     if name == "escalate_to_frontdesk":
         room = a.get("room")
         where = f" from room {room}" if room else ""
@@ -213,6 +219,16 @@ SESSION_TOOLS = [
             "type": "object",
             "properties": {"room": {"type": "string"}},
             "required": ["room"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "hotel_info",
+        "description": "Hotel policy and facility facts: check-in/out times, late checkout, which floor each facility is on and its hours, wifi, breakfast, parking, laundry. Answer general questions ONLY from this.",
+        "parameters": {
+            "type": "object",
+            "properties": {"topic": {"type": "string", "enum": list(HOTEL_FACTS)}},
+            "required": ["topic"],
         },
     },
     {
@@ -357,6 +373,12 @@ class ToolHandlers:
             return {"ack": False, "reason": "no_active_delivery_for_room"}
         self._q.put({"cmd": "announce", "task_id": t["task_id"]})
         return {"ack": True, "task_id": t["task_id"]}
+
+    def hotel_info(self, topic):
+        answer = HOTEL_FACTS.get(topic)
+        if answer is None:
+            return {"error": "unknown_topic", "topics": list(HOTEL_FACTS)}
+        return {"topic": topic, "answer": answer}
 
     def escalate_to_frontdesk(self, reason, room=None):
         # `room` was hardcoded None here until the admin dashboard needed
@@ -563,6 +585,12 @@ if __name__ == "__main__":
             == "dispatch_delivery completed."
         assert summarize_result("not_a_tool", {}, {"error": "unknown_tool:x"}) \
             == "Couldn't do that: unknown_tool:x."
+
+        info = h.dispatch("hotel_info", {"topic": "late_checkout"})
+        assert "2pm" in info["answer"], info
+        assert h.hotel_info("spa")["error"] == "unknown_topic"
+        assert summarize_result("hotel_info", {"topic": "late_checkout"}, info) \
+            == "Answered a question about late checkout."
 
         print("tools self-check OK")
 

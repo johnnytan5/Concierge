@@ -2,7 +2,7 @@
  * Staff-facing wording, and the enumerations the edit form offers.
  *
  * The mockup shipped with invented tool names (place_order, get_menu,
- * get_order_status). These are the eight tools the orchestrator actually
+ * get_order_status). These are the tools the orchestrator actually
  * declares — see orchestrator/tools.py SESSION_TOOLS, which is the source
  * of truth. Keep them in step.
  */
@@ -15,10 +15,11 @@ export const TOOL_HUMAN: Record<string, string> = {
   recall_robot: 'Recalled a robot',
   get_fleet_state: 'Fleet check',
   announce_arrival: 'Announced arrival',
+  hotel_info: 'Hotel info',
   escalate_to_frontdesk: 'Escalated to desk',
 };
 
-/** Collapses the eight tools into the flow diagram's three tool nodes. */
+/** Collapses the tools into the flow diagram's four tool nodes. */
 export const TOOL_GROUP: Record<string, string> = {
   check_menu: 'menu',
   dispatch_delivery: 'dispatch',
@@ -27,6 +28,7 @@ export const TOOL_GROUP: Record<string, string> = {
   check_delivery_status: 'status',
   get_fleet_state: 'status',
   announce_arrival: 'status',
+  hotel_info: 'info',
   escalate_to_frontdesk: 'escalate',
 };
 
@@ -39,6 +41,7 @@ export const ARG_HUMAN: Record<string, string> = {
   remove: 'Removed',
   new_room: 'New room',
   reason: 'Reason',
+  topic: 'Topic',
 };
 
 /**

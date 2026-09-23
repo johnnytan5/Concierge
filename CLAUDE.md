@@ -87,6 +87,7 @@ that override convenience every time.
 | `recall_robot` | `task_id, reason` | `ack` | No |
 | `get_fleet_state` | — | `robots: [{robot_id, phase, current_task_id, battery, pose_frac}, ...]` | No |
 | `announce_arrival` | `room` | `ack` | No |
+| `hotel_info` | `topic` | `topic, answer` (from `orchestrator/hotel_facts.py`) | No |
 | `escalate_to_frontdesk` | `reason, room?` | `ack` | No |
 
 ## Current phase
