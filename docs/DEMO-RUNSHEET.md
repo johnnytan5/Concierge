@@ -83,12 +83,14 @@ mee goreng, club sandwich, extra blanket, extra pillow, still water, kopi o…
 > ⚠️ **`toothbrush` is in `KEYTERMS` but is hidden from the menu.** Don't order
 > it expecting success.
 
-**The loading gate.** After dispatch the robot sits at the desk in
-`COLLECTING` and will **not** move until someone confirms the bin is loaded.
-That's the Fleet card's **"Bin loaded — send it"** button. It is a hard FSM
-gate — if you forget it during a take, the robot just sits there.
-
-Same at the other end: on `ARRIVED`, **"Guest collected it"** releases it home.
+**Loading is on the button; the hand-over is automatic.** After dispatch the
+MuJoCo viewer cuts to the staff camera behind the desk: the robot turns its
+cargo door to the counter and opens it — and **waits** there until you press
+**"Bin loaded — send it"** on the Fleet card. Then the door closes, the view
+cuts back to the top plan and it sets off. At the room it cuts to the guest
+camera inside: room door swings open, cargo door opens ~4 s, both close, back
+to the top view, robot heads home by itself ("Guest collected it" skips the
+wait).
 
 ---
 
@@ -136,7 +138,8 @@ Watch the Live call panel fill: transcript lands, then `check_menu`, then
 
 ### Shot 3 — Load the bin, robot departs (0:30–0:45)
 
-Fleet tab → **"Bin loaded — send it"**.
+Fleet tab → **"Bin loaded — send it"** while the viewer shows the robot at
+the counter with its door open.
 
 > *"This is the bin-loading model real hotel robots use — Pudu, Keenon. A
 > human loads a lidded compartment; the robot never grasps anything. It
@@ -212,7 +215,7 @@ expensive real estate you have; the writeup is where the diagram goes.
 | Symptom | Cause | Do this |
 |---|---|---|
 | Agent interrupts itself | Echo — speaker into mic | Headphones. Restart the take |
-| Robot doesn't move after dispatch | Loading gate not confirmed | Fleet → "Bin loaded — send it" |
+| Robot doesn't move after dispatch | Waiting at the counter to be loaded | Fleet → "Bin loaded — send it" |
 | "No route to room…" | Room isn't 0803/0804/1204/1205 | Use a real one |
 | Item "not offered" | toothbrush / phone charger are hidden | Use towel, char kuey teow, teh tarik |
 | Call won't start | admin_api down, or a call already open | Check :8000; Hang up first |
