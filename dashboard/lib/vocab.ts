@@ -10,6 +10,7 @@
 export const TOOL_HUMAN: Record<string, string> = {
   check_menu: 'Menu lookup',
   dispatch_delivery: 'New order',
+  deliver_parcel: 'Food delivery',
   check_delivery_status: 'Order status',
   amend_delivery: 'Changed an order',
   recall_robot: 'Recalled a robot',
@@ -19,10 +20,11 @@ export const TOOL_HUMAN: Record<string, string> = {
   escalate_to_frontdesk: 'Escalated to desk',
 };
 
-/** Collapses the tools into the flow diagram's four tool nodes. */
+/** Collapses the tools into the flow diagram's five tool nodes. */
 export const TOOL_GROUP: Record<string, string> = {
   check_menu: 'menu',
   dispatch_delivery: 'dispatch',
+  deliver_parcel: 'parcel',
   amend_delivery: 'dispatch',
   recall_robot: 'dispatch',
   check_delivery_status: 'status',
@@ -42,6 +44,8 @@ export const ARG_HUMAN: Record<string, string> = {
   new_room: 'New room',
   reason: 'Reason',
   topic: 'Topic',
+  source: 'From',
+  description: 'What',
 };
 
 /**

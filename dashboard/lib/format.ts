@@ -308,11 +308,16 @@ export function outcomesFor(calls: OutcomeCall[], dev: boolean): Outcome[] {
   for (const c of calls) {
     const a = c.arguments ?? {};
     const r = (c.result && typeof c.result === 'object' ? c.result : {}) as Record<string, unknown>;
-    if (c.tool_name === 'dispatch_delivery' && typeof r.task_id === 'string' && r.task_id) {
+    // deliver_parcel (a delivery-app order carried up from the desk) is an
+    // order too, with the same result shape.
+    if ((c.tool_name === 'dispatch_delivery' || c.tool_name === 'deliver_parcel')
+        && typeof r.task_id === 'string' && r.task_id) {
       const sent = Array.isArray(r.dispatched_items)
         ? r.dispatched_items.map((i) => String((i as { name?: unknown })?.name ?? i))
         : arr(a.items);
-      orders.set(r.task_id, sent);
+      // deliver_parcel can join an order already waiting at the desk
+      if (orders.has(r.task_id)) orders.get(r.task_id)!.push(...sent);
+      else orders.set(r.task_id, sent);
     } else if (c.tool_name === 'amend_delivery' && typeof a.task_id === 'string' && orders.has(a.task_id)) {
       const items = orders.get(a.task_id)!;
       items.push(...arr(a.add));

@@ -92,6 +92,15 @@ def _summarize(name: str, a: dict, r) -> str:
             line += f" Couldn't send {missing_txt}."
         return line
 
+    if name == "deliver_parcel":
+        room = a.get("room", "?")
+        if r.get("error") == "unknown_room":
+            return f"No route to room {room} for the {a.get('source', 'delivery')} order."
+        what = (r.get("dispatched_items") or [{}])[0].get("name") or a.get("source", "delivery")
+        if r.get("joined_existing_order"):
+            return f"Added the {what} to room {room}'s order waiting at the desk — one trip."
+        return f"Robot booked to take the {what} up to room {room} once it reaches the desk."
+
     if name == "check_delivery_status":
         if r.get("error"):
             return "No matching order found."
@@ -167,6 +176,20 @@ SESSION_TOOLS = [
                 "priority": {"type": "string", "enum": ["normal", "urgent"]},
             },
             "required": ["room", "items"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "deliver_parcel",
+        "description": "The guest has ordered food (or a parcel) from an outside delivery app and wants it brought up. The rider can't go upstairs, so they leave it at the front desk; this books a robot to carry it to the room once staff load it. Never use this to place an order -- only to deliver one the guest already made.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "room": {"type": "string", "description": "Room number, e.g. '1204'."},
+                "source": {"type": "string", "description": "The app or courier, e.g. 'Uber Eats', 'Grab', 'Meituan', 'Foodpanda'."},
+                "description": {"type": "string", "description": "What it is, in a few words, e.g. 'food order', 'pizza', 'parcel'."},
+            },
+            "required": ["room", "source"],
         },
     },
     {
@@ -356,6 +379,40 @@ class ToolHandlers:
         # is genuinely farther than the near one.
         return {"task_id": task_id, "eta_seconds": eta_seconds_for(room),
                 "dispatched_items": dispatched, "unavailable_items": unavailable}
+
+    def deliver_parcel(self, room, source, description="food order"):
+        """A delivery-app order dropped at the front desk, carried up by the
+        robot -- the thing hotel robots in China mostly do. Same robot
+        journey as dispatch_delivery (loading at the counter waits for "Bin
+        loaded", which is staff putting the rider's bag in), but the item is
+        not ours: no menu lookup, no stock decrement."""
+        if room not in nav.known_rooms():
+            return {"task_id": None, "error": "unknown_room",
+                    "deliverable_rooms": nav.known_rooms()}
+        # The model sometimes repeats the app in the description ("Grab food
+        # order"); don't label it "Grab Grab food order".
+        description = (description or "food order").strip()
+        label = description if source.lower() in description.lower() else f"{source} {description}".strip()
+        # Guest already has an order for this room still at the counter?
+        # Put the bag in the same bin: one trip, one "Bin loaded", and it
+        # stays on the robot the viewer shows (a second task would go to
+        # robot_2, which has no window).
+        live = self._newest_for_room(room)
+        if live and live["phase"] in ("QUEUED", "COLLECTING"):
+            self._q.put({"cmd": "amend", "task_id": live["task_id"], "add": [label],
+                         "remove": [], "new_room": None})
+            return {"task_id": live["task_id"], "eta_seconds": eta_seconds_for(room),
+                    "dispatched_items": [{"name": label}], "joined_existing_order": True,
+                    "waiting_for": "the rider to drop it at the front desk; it goes up in the "
+                                   "same trip as the order already waiting there"}
+        task_id = uuid.uuid4().hex[:8]
+        self._q.put({"cmd": "dispatch", "task_id": task_id, "room": room,
+                     "items": [label], "priority": "normal"})
+        inventory.insert_delivery({"task_id": task_id, "room": room, "items": [label],
+                                    "phase": "QUEUED", "priority": "normal"})
+        return {"task_id": task_id, "eta_seconds": eta_seconds_for(room),
+                "dispatched_items": [{"name": label}],
+                "waiting_for": "the rider to drop it at the front desk; staff load it into the robot"}
 
     def _newest_for_room(self, room):
         """Newest still-live task for a room. `tasks` is never purged, so
@@ -657,6 +714,26 @@ if __name__ == "__main__":
         assert needs_nudge("One moment, let me pass that to the front desk.")
         assert not needs_nudge("Let me check our policy. 3pm is $90. Want me to request it?")
         assert not needs_nudge("One moment, let me check. Your towel is on the way.")
+
+        # delivery-app hand-off: not a menu item, no stock touched
+        stock_calls = []
+        inventory.decrement_stock = lambda *a, **k: stock_calls.append(a)
+        parcel = h.dispatch("deliver_parcel", {"room": "1204", "source": "Uber Eats", "description": "food order"})
+        assert parcel["task_id"] and parcel["dispatched_items"] == [{"name": "Uber Eats food order"}], parcel
+        assert q.items[-1]["items"] == ["Uber Eats food order"] and not stock_calls, (q.items[-1], stock_calls)
+        assert h.deliver_parcel("9999", "Grab")["error"] == "unknown_room"
+        assert h.deliver_parcel("1204", "Grab", "Grab food order")["dispatched_items"] == [{"name": "Grab food order"}]
+        # an order for the same room still at the counter: joins it, no new task
+        state["tasks"] = {"t9": {"task_id": "t9", "room": "0803", "phase": "COLLECTING",
+                                  "items": ["towel"], "dispatched_at": None}}
+        joined = h.deliver_parcel("0803", "Grab")
+        assert joined["task_id"] == "t9" and joined["joined_existing_order"], joined
+        assert q.items[-1] == {"cmd": "amend", "task_id": "t9", "add": ["Grab food order"],
+                               "remove": [], "new_room": None}, q.items[-1]
+        state["tasks"]["t9"]["phase"] = "EN_ROUTE"   # already left: a new trip instead
+        assert h.deliver_parcel("0803", "Grab")["task_id"] != "t9"
+        assert summarize_result("deliver_parcel", {"room": "1204", "source": "Uber Eats"}, parcel) \
+            == "Robot booked to take the Uber Eats food order up to room 1204 once it reaches the desk."
 
         assert h.dispatch("end_call", {})["ack"] is True and h.end_requested
         assert summarize_result("end_call", {}, {"ack": True}) == "Call ended."

@@ -257,3 +257,21 @@ test('outcomesFor lists every outcome of a call, not just the order', () => {
   // a refused dispatch (no task_id) is not an order
   assert.deepEqual(outcomesFor([{ tool_name: 'dispatch_delivery', arguments: {}, result: { task_id: null } }], false), []);
 });
+
+test('outcomesFor treats a delivery-app hand-off as an order', () => {
+  const calls = [{ tool_name: 'deliver_parcel', arguments: { room: '1204', source: 'Uber Eats' },
+    result: { task_id: 'ab12cd34', dispatched_items: [{ name: 'Uber Eats food order' }] } }];
+  assert.deepEqual(outcomesFor(calls, false),
+    [{ key: 'oab12cd34', label: 'Order AB12CD34 · 1× Uber Eats food order' }]);
+});
+
+test('outcomesFor folds a joined delivery-app bag into the waiting order', () => {
+  const calls = [
+    { tool_name: 'dispatch_delivery', arguments: { room: '1204', items: ['towel', 'conditioner'] },
+      result: { task_id: 'aa11bb22', dispatched_items: [{ name: 'towel' }, { name: 'conditioner' }] } },
+    { tool_name: 'deliver_parcel', arguments: { room: '1204', source: 'Grab' },
+      result: { task_id: 'aa11bb22', joined_existing_order: true, dispatched_items: [{ name: 'Grab food order' }] } },
+  ];
+  assert.deepEqual(outcomesFor(calls, false),
+    [{ key: 'oaa11bb22', label: 'Order AA11BB22 · 1× towel, 1× conditioner, 1× Grab food order' }]);
+});

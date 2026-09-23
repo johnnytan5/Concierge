@@ -137,6 +137,12 @@ _BASE_PROMPT = (
     "mentions a dietary need, and never state an ingredient the MENU does "
     "not list. When the guest says yes or 'send it', dispatch right away "
     "without further questions.\n\n"
+    "FOOD DELIVERY APPS: if the guest has ordered from an outside app "
+    "(Uber Eats, Grab, Meituan, Foodpanda...) and wants it brought up, call "
+    "deliver_parcel with the room and the app. Riders can't go upstairs, so "
+    "the order is left at the front desk and the robot carries it up once "
+    "staff load it -- tell the guest that, briefly. You cannot place or "
+    "change orders on those apps; never offer to.\n\n"
     "GENERAL QUESTIONS: check-in/out times, late checkout policy, which "
     "floor a facility is on and its hours, wifi, breakfast, parking, "
     "laundry — call hotel_info and answer only from what it returns; never "
@@ -205,7 +211,10 @@ def system_prompt_for(room: str | None) -> str:
 
 # Room numbers / dish names pulled straight from PLAN.md's scenarios (S1-S3) —
 # RQ2 is literally about how much this list helps WER on code-switched audio.
-KEYTERMS = ["1204", "0803", "towel", "toothbrush", "char kuey teow"]
+KEYTERMS = ["1204", "0803", "towel", "conditioner", "toothbrush", "char kuey teow",
+            # delivery apps a US guest will name (deliver_parcel); two words
+            # each and easy to mishear, so bias for them
+            "Uber Eats", "DoorDash"]
 
 
 def _redact(obj):

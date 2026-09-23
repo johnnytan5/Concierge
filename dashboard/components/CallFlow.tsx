@@ -232,6 +232,8 @@ export default function CallFlow({
                 lit={(groupCounts.get('menu') ?? 0) > 0} count={groupCounts.get('menu')} />
               <Node z={z} label={dev ? 'dispatch / amend / recall' : 'Order handling'}
                 lit={(groupCounts.get('dispatch') ?? 0) > 0} count={groupCounts.get('dispatch')} />
+              <Node z={z} label={dev ? 'deliver_parcel' : 'Food delivery'}
+                lit={(groupCounts.get('parcel') ?? 0) > 0} count={groupCounts.get('parcel')} />
               <Node z={z} label={dev ? 'hotel_info' : 'General inquiry'}
                 lit={(groupCounts.get('info') ?? 0) > 0} count={groupCounts.get('info')} />
               <Node z={z} label={dev ? 'escalate_to_frontdesk' : 'Escalated to desk'}

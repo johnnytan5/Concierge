@@ -136,10 +136,23 @@ Watch the Live call panel fill: transcript lands, then `check_menu`, then
 > *"No language configuration. It code-switches natively — and more
 > importantly, that sentence just became a real order."*
 
-### Shot 3 — Load the bin, robot departs (0:30–0:45)
+### Shot 3 — Add the Uber Eats order, load the bin, robot departs (0:30–0:45)
 
-Fleet tab → **"Bin loaded — send it"** while the viewer shows the robot at
-the counter with its door open.
+**While the robot is still at the counter** (door open, before "Bin loaded"):
+
+> *"Oh, and my Uber Eats order is arriving soon — can you bring that up too?"*
+
+It joins the waiting order (one bin, one trip, still Robot 1 in the viewer):
+the Result shows `towel, conditioner, Uber Eats food order` and the **Food
+delivery** box lights. Ask it *after* "Bin loaded" and it becomes a separate
+trip on Robot 2 — which has no viewer window.
+
+> *"In hotels in China this is what the robots mostly do — the rider can't go
+> upstairs, so the bag waits at the desk and the robot takes the last 50
+> metres."*
+
+Then Fleet tab → **"Bin loaded — send it"** while the viewer shows the robot
+at the counter with its door open.
 
 > *"This is the bin-loading model real hotel robots use — Pudu, Keenon. A
 > human loads a lidded compartment; the robot never grasps anything. It

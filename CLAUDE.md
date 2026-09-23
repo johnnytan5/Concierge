@@ -82,6 +82,7 @@ that override convenience every time.
 |---|---|---|---|
 | `check_menu` | `items[]?` | list of `{name, category, price, dietary_tags, available, in_stock}` | No |
 | `dispatch_delivery` | `room, items[], priority` | `task_id, eta_seconds, dispatched_items[], unavailable_items[]` | No |
+| `deliver_parcel` | `room, source, description?` | `task_id, eta_seconds, dispatched_items[]` (outside delivery-app order, no stock check) | No |
 | `check_delivery_status` | `task_id \| room` | `phase, position, eta` | No |
 | `amend_delivery` | `task_id, add[], remove[], new_room` | updated task | No |
 | `recall_robot` | `task_id, reason` | `ack` | No |

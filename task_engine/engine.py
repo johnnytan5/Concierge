@@ -98,8 +98,14 @@ def _handle(cmd, tasks):
         t = tasks.get(cmd["task_id"])
         if not t or t["phase"] in ("ARRIVED", "RETURNING", "PARKING", "DONE", "AT_DESK"):
             return
-        items = (set(t["items"]) - set(cmd.get("remove") or [])) | set(cmd.get("add") or [])
-        t["items"] = sorted(items)
+        # A list, not a set: duplicates ARE the quantity (["towel","towel"] is
+        # 2x towel), and a set silently turned any amended 2x into 1x. Remove
+        # takes out one occurrence per mention, add appends.
+        items = list(t["items"])
+        for x in cmd.get("remove") or []:
+            if x in items:
+                items.remove(x)
+        t["items"] = items + list(cmd.get("add") or [])
         if cmd.get("new_room"):
             t["room"] = cmd["new_room"]
         if t["phase"] == "EN_ROUTE":
