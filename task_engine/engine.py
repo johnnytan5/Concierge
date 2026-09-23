@@ -117,9 +117,17 @@ def _handle(cmd, tasks):
         if not t:
             return
         phase = t["phase"]
-        if phase in ("QUEUED", "COLLECTING"):
-            # never left the desk (or never even got a robot) -- just cancel
+        if phase == "QUEUED":
+            # never even got a robot -- just cancel
             t["phase"] = "AT_DESK"
+        elif phase == "COLLECTING":
+            # never left the desk, but may be mid-loading-scene: turned to
+            # the counter, cargo door open, viewer on the staff camera. Tidy
+            # all of that (PARKING straightens the heading) before AT_DESK.
+            t["phase"] = "PARKING"
+            t["_parking_terminal_phase"] = "AT_DESK"
+            t["_restore_view"] = True
+            t.pop("_load", None)
         elif phase == "EN_ROUTE":
             t["phase"] = "RECALLED"
             t["dispatched_at"] = time.time()
@@ -127,6 +135,9 @@ def _handle(cmd, tasks):
         elif phase == "ARRIVED":
             t["phase"] = "RETURNING"  # _drive_home closes the door on the way
             t["_leg_oriented"] = False
+            t.pop("_arr", None)
+            t.pop("_arr_t", None)
+            t["_restore_view"] = True  # mid-hand-over: room door + camera
         else:
             return  # RETURNING / RECALLED / PARKING / DONE / AT_DESK -- already coming back or over
         t["reason"] = cmd.get("reason")
@@ -211,6 +222,11 @@ def _bearing_from_here(sim, path: list[tuple[float, float]], lookahead_m: float 
 
 def _drive_home(sim, task, now, terminal_phase, drive_speed, arrival_tolerance_m):
     sim.close_door()  # idempotent ctrl target; covers a recall straight out of ARRIVED
+    if task.pop("_restore_view", False):
+        # recalled mid-hand-over: never leave a room door open or the viewer
+        # parked inside the room
+        sim.set_room_door(task["room"], False)
+        sim.set_camera("follow")
     path = list(reversed(nav.path_for(task["room"])))
     if not task["_leg_oriented"]:
         # Rotate toward the reversed path first -- see _bearing_from_here()'s
@@ -257,6 +273,22 @@ DESK_FACE_YAW_RAD = math.pi  # facing -x -- the front desk sits on the corridor
                               # of the parking spot, not at the desk itself.
 HEADING_TOLERANCE_DEG = 5.0
 
+# Arrival presentation: the robot's cargo door is on its local -y side
+# (delivery_bot_v2.xml), so to show it to the room it turns so that side
+# faces the room door: yaw = (direction of the room) + 90 degrees.
+ROOM_PRESENT_YAW_RAD = {
+    "0803": 0.0,            # room to the south (-y)
+    "0804": math.pi,        # room to the north (+y)
+    "1204": math.pi / 2,    # room to the east (+x)
+    "1205": -math.pi / 2,   # room to the west (-x)
+}
+# Loading at the front desk: the desk is behind the parking spot (-x), so the
+# cargo side faces it at yaw = 180 + 90 = -90 degrees.
+DESK_PRESENT_YAW_RAD = -math.pi / 2
+# How long the cargo door stays open for the guest before closing by itself.
+# "Guest collected it" (complete_collection) skips the rest of the wait.
+CARGO_HOLD_S = 4.0
+
 
 def _rotate_toward(sim, target_yaw: float, steer_gain: float = 2.0) -> bool:
     """Pure in-place rotation toward `target_yaw` -- v=0.0 always. This is
@@ -301,6 +333,94 @@ def _settle_heading(sim, task, steer_gain: float = 2.0):
     return task, False
 
 
+def _loading_sequence(sim, task, now, confirmed: bool):
+    """Loading at the front desk, the mirror of _arrival_sequence (phase
+    stays COLLECTING throughout, so the dashboard shows "Loading"):
+
+      turn        a quarter turn to present the cargo side to the counter,
+                  then cut the viewer to the staff camera behind the desk
+                  and open the cargo door
+      open        wait for complete_loading ("Bin loaded -- send it")
+      closing     wait for the cargo door, cut back to the top view, and
+                  set off (EN_ROUTE pre-rotates toward the corridor)
+
+    Gated on the kiosk button on purpose (demo choice): a person loading the
+    bin is the moment the robot leaves, so the door stays open until then.
+    The room hand-over, by contrast, closes on a timer (CARGO_HOLD_S)."""
+    step = task.get("_load", "turn")
+    if step == "turn":
+        if _rotate_toward(sim, DESK_PRESENT_YAW_RAD):
+            sim.set_camera("desk_staff")
+            sim.open_door()
+            step = "open"
+    elif step == "open":
+        if confirmed:
+            sim.close_door()
+            step = "closing"
+    elif step == "closing":
+        if sim.pull_status().door.fraction_open <= 0.05:
+            sim.set_camera("follow")
+            task["phase"] = "EN_ROUTE"
+            task["dispatched_at"] = now
+            task["_leg_oriented"] = False
+            step = None
+    if step is None:
+        task.pop("_load", None)
+    else:
+        task["_load"] = step
+    return task
+
+
+def _arrival_sequence(sim, task, now, confirmed: bool):
+    """The hand-over at the room, one step per tick (phase stays ARRIVED
+    throughout, so the dashboard just shows "At the door"):
+
+      turn            present the cargo-door side to the room, then cut the
+                      viewer to the in-room guest camera and swing the room
+                      door open
+      room_opening    wait for the room door, then open the cargo door
+      cargo_open      hold CARGO_HOLD_S (or until complete_collection)
+      cargo_closing   wait for the cargo door, then close the room door
+      room_closing    wait for the room door, cut back to the top view,
+                      and head home (RETURNING)
+
+    Doors animate inside the sim's step loop; this only sets targets and
+    watches them, so every tick still returns immediately."""
+    room = task["room"]
+    step = task.get("_arr", "turn")
+    if step == "turn":
+        yaw = ROOM_PRESENT_YAW_RAD.get(room)
+        if yaw is None or _rotate_toward(sim, yaw):
+            sim.set_camera("room_" + room)
+            sim.set_room_door(room, True)
+            step = "room_opening"
+    elif step == "room_opening":
+        if not sim.has_room_door(room) or sim.room_door_fraction(room) >= 0.98:
+            sim.open_door()
+            task["_arr_t"] = now
+            step = "cargo_open"
+    elif step == "cargo_open":
+        if confirmed or now - task["_arr_t"] >= CARGO_HOLD_S:
+            sim.close_door()
+            step = "cargo_closing"
+    elif step == "cargo_closing":
+        if sim.pull_status().door.fraction_open <= 0.05:
+            sim.set_room_door(room, False)
+            step = "room_closing"
+    elif step == "room_closing":
+        if sim.room_door_fraction(room) <= 0.02:
+            sim.set_camera("follow")
+            task.pop("_arr_t", None)
+            task["phase"] = "RETURNING"
+            task["_leg_oriented"] = False
+            step = None
+    if step is None:
+        task.pop("_arr", None)
+    else:
+        task["_arr"] = step
+    return task
+
+
 def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
              drive_speed: float = DRIVE_SPEED_MPS,
              arrival_tolerance_m: float = 0.05):
@@ -311,20 +431,7 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
     (robot waits at COLLECTING/ARRIVED forever) -- acceptable for the
     demo, flagged as a follow-up, not silently ignored."""
     if task["phase"] == "COLLECTING":
-        sim.open_door()  # idempotent ctrl target -- safe every tick, matches close_door()'s pattern
-        _rotate_toward(sim, DESK_FACE_YAW_RAD)  # turn to face the desk while waiting
-                                                   # to be loaded; naturally re-corrects
-                                                   # toward the outbound path once
-                                                   # EN_ROUTE's pure_pursuit_step takes
-                                                   # over below, the same way any other
-                                                   # heading correction in this codebase
-                                                   # already does -- no un-rotate needed
-        if confirmed:
-            sim.close_door()
-            task["phase"] = "EN_ROUTE"
-            task["dispatched_at"] = now
-            task["_leg_oriented"] = False
-        return task, 0.0
+        return _loading_sequence(sim, task, now, confirmed), 0.0
 
     if task["phase"] == "EN_ROUTE":
         path = nav.path_for(task["room"])
@@ -343,17 +450,13 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
             arrival_tolerance_m=arrival_tolerance_m)
         if done:
             sim.stop_base()
-            sim.open_door()
             task["phase"] = "ARRIVED"
             task["arrived_at"] = now
+            task["_arr"] = "turn"
         return task, frac
 
     if task["phase"] == "ARRIVED":
-        if confirmed:
-            sim.close_door()
-            task["phase"] = "RETURNING"
-            task["_leg_oriented"] = False
-        return task, 1.0
+        return _arrival_sequence(sim, task, now, confirmed), 1.0
 
     if task["phase"] == "RETURNING":
         return _drive_home(sim, task, now, "DONE", drive_speed, arrival_tolerance_m)
@@ -362,20 +465,31 @@ def _advance(sim: DeliveryBotSimulator, task, now, confirmed: bool = False,
         return _drive_home(sim, task, now, "AT_DESK", drive_speed, arrival_tolerance_m)
 
     if task["phase"] == "PARKING":
+        if task.pop("_restore_view", False):  # recalled mid-loading-scene
+            sim.close_door()
+            sim.set_camera("follow")
         task, _settled = _settle_heading(sim, task)
         return task, 1.0
 
     return task, None  # QUEUED / DONE / AT_DESK — no motion
 
 
-def run(cmd_queue, state):
+def run(cmd_queue, state, viewer_robot=None):
     """Entry point for Process 2. Polls Supabase for human-confirmation
     events (~once per second, not every tick) and mirrors robots/
     deliveries state back; the phase-transition logic above is
-    unchanged by that."""
+    unchanged by that.
+
+    `viewer_robot` opens the MuJoCo viewer on that robot's sim -- the SAME
+    physics the dashboard reads, so the window and the admin UI can't
+    disagree. Each robot is its own MuJoCo world, so only one is shown. On
+    macOS this process must have been spawned by mjpython (see
+    orchestrator/agent.py main()); launch_passive refuses otherwise."""
     sims = {rid: DeliveryBotSimulator(MODEL_PATH) for rid in ROBOT_IDS}
-    for sim in sims.values():
-        sim.start(headless=True)
+    for rid, sim in sims.items():
+        sim.start(headless=(rid != viewer_robot), show_ui=False)
+    if viewer_robot in sims:
+        sims[viewer_robot].set_camera("follow")
 
     tasks = {}
     task_robot = {}  # task_id -> robot_id, kept after the task ends (see I3)
@@ -521,37 +635,41 @@ if __name__ == "__main__":
                 "far-arm room (1204) should report a longer ETA than near-arm (0803)",
                 tasks["t1"]["eta_seconds"], tasks["t2"]["eta_seconds"])
 
-            # real coverage for the turn-to-face-desk behavior: give both
-            # robots real ticks to settle before confirming (a same-tick
-            # confirm, like the rest of this self-check's confirms use,
-            # would exercise _rotate_toward() for exactly one tick -- not
-            # enough to prove it actually reaches DESK_FACE_YAW_RAD). Real
-            # margin over the measured settle time (~124 ticks, traced
-            # tick-by-tick: clean monotonic ~1.5deg/tick convergence, not a
-            # stall -- same steer_gain=2.0 pattern as _settle_heading).
-            for _ in range(180):
-                tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
-                                            drive_speed=speed, arrival_tolerance_m=tol_m)
-                tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
-                                            drive_speed=speed, arrival_tolerance_m=tol_m)
+            # the loading scene: quarter turn to the counter, cargo door opens
+            # and STAYS open with no button press (well past any timer), then
+            # "Bin loaded" closes it and the robot sets off
+            presented = {"t1": None, "t2": None}
+            opened = {"t1": False, "t2": False}
+            for _ in range(160):  # 8s, no confirmation
+                for rid, tid in (("robot_1", "t1"), ("robot_2", "t2")):
+                    tasks[tid], _ = _advance(sims[rid], tasks[tid], time.time(),
+                                               drive_speed=speed, arrival_tolerance_m=tol_m)
+                    if tasks[tid].get("_load") == "open" and presented[tid] is None:
+                        presented[tid] = sims[rid].pull_status().base.yaw_deg
+                    opened[tid] |= sims[rid].pull_status().door.fraction_open >= 0.9
                 time.sleep(0.05)
             for rid, tid in (("robot_1", "t1"), ("robot_2", "t2")):
-                assert tasks[tid]["phase"] == "COLLECTING", (rid, tasks[tid])
-                yaw = math.radians(sims[rid].pull_status().base.yaw_deg)
-                err_deg = abs(math.degrees(math.atan2(math.sin(DESK_FACE_YAW_RAD - yaw),
-                                                        math.cos(DESK_FACE_YAW_RAD - yaw))))
-                assert err_deg <= HEADING_TOLERANCE_DEG, (
-                    "robot should have turned to face the desk while COLLECTING", rid, err_deg)
-            print("[measured] both robots turned to face the desk while COLLECTING")
-
-            # complete_loading for both -> EN_ROUTE; door should already be
-            # open from the COLLECTING branch's every-tick open_door()
-            tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(), confirmed=True,
-                                        drive_speed=speed, arrival_tolerance_m=tol_m)
-            tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(), confirmed=True,
-                                        drive_speed=speed, arrival_tolerance_m=tol_m)
-            assert tasks["t1"]["phase"] == "EN_ROUTE"
-            assert tasks["t2"]["phase"] == "EN_ROUTE"
+                assert tasks[tid]["phase"] == "COLLECTING" and tasks[tid]["_load"] == "open", (
+                    rid, "left the desk without Bin loaded", tasks[tid])
+            for _ in range(300):
+                for rid, tid in (("robot_1", "t1"), ("robot_2", "t2")):
+                    if tasks[tid]["phase"] != "COLLECTING":
+                        continue
+                    tasks[tid], _ = _advance(sims[rid], tasks[tid], time.time(), confirmed=True,
+                                               drive_speed=speed, arrival_tolerance_m=tol_m)
+                    if tasks[tid].get("_load") == "open" and presented[tid] is None:
+                        presented[tid] = sims[rid].pull_status().base.yaw_deg
+                    opened[tid] |= sims[rid].pull_status().door.fraction_open >= 0.9
+                if tasks["t1"]["phase"] == "EN_ROUTE" and tasks["t2"]["phase"] == "EN_ROUTE":
+                    break
+                time.sleep(0.05)
+            for rid, tid in (("robot_1", "t1"), ("robot_2", "t2")):
+                assert tasks[tid]["phase"] == "EN_ROUTE", (rid, tasks[tid])
+                assert opened[tid], f"{rid}: cargo door never opened for loading"
+                assert sims[rid].pull_status().door.fraction_open <= 0.05, f"{rid}: left the desk with the door open"
+                err = abs(presented[tid] - math.degrees(DESK_PRESENT_YAW_RAD))
+                assert err <= HEADING_TOLERANCE_DEG, (rid, "not presented to the counter", presented[tid])
+            print(f"[measured] loading scene: presented to counter at {presented}, door held open until Bin loaded, then closed and left")
 
             i = 0
             for i in range(1000):  # real margin over measured arrival (~695-696 ticks).
@@ -563,10 +681,13 @@ if __name__ == "__main__":
                                      # down near the original pre-desk-facing measurement
                                      # (~665-669 ticks) despite COLLECTING's desk-facing
                                      # turn adding a full reversal to correct
-                tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
-                                            drive_speed=speed, arrival_tolerance_m=tol_m)
-                tasks["t2"], _ = _advance(sims["robot_2"], tasks["t2"], time.time(),
-                                            drive_speed=speed, arrival_tolerance_m=tol_m)
+                # hold each robot at ARRIVED once it gets there: the hand-over
+                # sequence would otherwise run to RETURNING on the shorter
+                # 0803 leg before the far-arm robot even arrives
+                for rid, tid in (("robot_1", "t1"), ("robot_2", "t2")):
+                    if tasks[tid]["phase"] != "ARRIVED":
+                        tasks[tid], _ = _advance(sims[rid], tasks[tid], time.time(),
+                                                   drive_speed=speed, arrival_tolerance_m=tol_m)
                 if tasks["t1"]["phase"] == "ARRIVED" and tasks["t2"]["phase"] == "ARRIVED":
                     break
                 time.sleep(0.05)
@@ -575,9 +696,22 @@ if __name__ == "__main__":
             print(f"[measured] both EN_ROUTE->ARRIVED: {i} ticks")
 
             # complete_collection -> RETURNING -> drive home -> DONE
-            tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(), confirmed=True,
-                                        drive_speed=speed, arrival_tolerance_m=tol_m)
-            assert tasks["t1"]["phase"] == "RETURNING"
+            # the hand-over sequence: turn to the room, room door opens, cargo
+            # door opens, holds, closes, room door closes, then RETURNING
+            door_seen_open = cargo_seen_open = False
+            for i in range(300):
+                tasks["t1"], _ = _advance(sims["robot_1"], tasks["t1"], time.time(),
+                                            drive_speed=speed, arrival_tolerance_m=tol_m)
+                door_seen_open |= sims["robot_1"].room_door_fraction("1204") >= 0.98
+                cargo_seen_open |= sims["robot_1"].pull_status().door.fraction_open >= 0.9
+                if tasks["t1"]["phase"] == "RETURNING":
+                    break
+                time.sleep(0.05)
+            assert tasks["t1"]["phase"] == "RETURNING", tasks["t1"]
+            assert door_seen_open and cargo_seen_open, (door_seen_open, cargo_seen_open)
+            assert sims["robot_1"].room_door_fraction("1204") <= 0.02, "room door left open"
+            assert sims["robot_1"].pull_status().door.fraction_open <= 0.05, "cargo door left open"
+            print(f"[measured] t1 (1204) hand-over: room door + cargo door opened and closed, {i} ticks")
             for i in range(1200):  # real margin over measured arrival (~805-808 ticks,
                                      # including the pre-rotation and PARKING
                                      # settle-heading steps). Same pre-rotate-then-drive
@@ -596,6 +730,13 @@ if __name__ == "__main__":
             _handle({"cmd": "dispatch", "task_id": "t3", "room": "0804", "items": ["towel"]}, tasks)
             tasks["t3"]["phase"] = "COLLECTING"
             _handle({"cmd": "recall", "task_id": "t3", "reason": "guest changed mind"}, tasks)
+            assert tasks["t3"]["phase"] == "PARKING", tasks["t3"]
+            for _ in range(100):  # tidy-up: door shut, heading straightened
+                tasks["t3"], _ = _advance(sims["robot_2"], tasks["t3"], time.time(),
+                                            drive_speed=speed, arrival_tolerance_m=tol_m)
+                if tasks["t3"]["phase"] == "AT_DESK":
+                    break
+                time.sleep(0.05)
             assert tasks["t3"]["phase"] == "AT_DESK", tasks["t3"]
 
             # recall MID-EN_ROUTE -- the real proof that reversing the path
@@ -618,8 +759,12 @@ if __name__ == "__main__":
             # not just in isolation.
             _handle({"cmd": "dispatch", "task_id": "t4", "room": "1205", "items": ["towel"]}, tasks)
             tasks["t4"]["phase"] = "COLLECTING"
-            tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(), confirmed=True,
-                                        drive_speed=speed, arrival_tolerance_m=tol_m)
+            for _ in range(200):  # loading scene, skipped ahead by complete_loading
+                tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(), confirmed=True,
+                                            drive_speed=speed, arrival_tolerance_m=tol_m)
+                if tasks["t4"]["phase"] == "EN_ROUTE":
+                    break
+                time.sleep(0.05)
             for _ in range(40):  # partway through the near arm, well before the junction
                 tasks["t4"], _ = _advance(sims["robot_1"], tasks["t4"], time.time(),
                                             drive_speed=speed, arrival_tolerance_m=tol_m)
@@ -657,6 +802,7 @@ if __name__ == "__main__":
             print(f"[measured] t2 (0803) recall-from-ARRIVED RETURNING->DONE: {i} ticks")
             door = sims["robot_2"].pull_status().door
             print(f"robot_2 door after recall-from-ARRIVED: {door}")
+            assert sims["robot_2"].room_door_fraction("0803") <= 0.02, "0803 door left open after recall"
 
             print("engine self-check OK (real corridor scene: near-arm + far-arm "
                   "rooms through the real corner, differing per-room ETA, "

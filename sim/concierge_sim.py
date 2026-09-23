@@ -59,6 +59,10 @@ import mujoco.viewer as mj_viewer
 # matched the observed residual exactly) — 31% "still open" on this small
 # a range. Fixed in the MJCF (kp 200->3000, kv 20->80, same damping ratio).
 # lid_top_slide closes with gravity assisting and had no such offset.
+# Hotel room doors: fully open is 100 degrees into the room, swung in ~1.5s.
+ROOM_DOOR_OPEN_RAD = 1.75
+ROOM_DOOR_RADPS = ROOM_DOOR_OPEN_RAD / 1.5
+
 DOOR_TOP_RANGE_M = 0.16
 DOOR_BOTTOM_RANGE_M = 0.04
 
@@ -133,6 +137,18 @@ class DeliveryBotSimulator:
         self._door_top_qadr = self.model.jnt_qposadr[self._door_top_joint]
         self._door_bot_qadr = self.model.jnt_qposadr[self._door_bot_joint]
 
+        # Hinged room doors (scene_corridor.xml's door_hinge_<room>), if the
+        # scene has them. Driven kinematically: the step loop walks each
+        # hinge toward its target at ROOM_DOOR_RADPS, so the swing is smooth
+        # at physics rate rather than at the task engine's 5 Hz tick.
+        self._room_doors: dict[str, tuple[int, int]] = {}   # room -> (qposadr, dofadr)
+        for j in range(self.model.njnt):
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, j) or ""
+            if name.startswith("door_hinge_"):
+                self._room_doors[name[len("door_hinge_"):]] = (
+                    int(self.model.jnt_qposadr[j]), int(self.model.jnt_dofadr[j]))
+        self._room_door_target: dict[str, float] = {r: 0.0 for r in self._room_doors}
+
         self._viewer = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -142,25 +158,29 @@ class DeliveryBotSimulator:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self, headless: bool = True, realtime: bool = True):
+    def start(self, headless: bool = True, realtime: bool = True, show_ui: bool = True):
         """Begin stepping the simulation in a background thread.
 
         headless=False opens the interactive MuJoCo viewer (for demos/dev).
         headless=True steps without any window (unattended / CI).
         realtime=True paces stepping to wall-clock time.
+        show_ui=False hides the viewer's side panels so the scene fills the
+        window (split-screen demo next to the dashboard).
         """
         if self._running:
             return
         self._running = True
 
         if not headless:
-            self._viewer = mj_viewer.launch_passive(self.model, self.data)
+            self._viewer = mj_viewer.launch_passive(
+                self.model, self.data, show_left_ui=show_ui, show_right_ui=show_ui)
 
         def _loop():
             dt = self.model.opt.timestep
             while self._running:
                 t0 = time.perf_counter()
                 with self._lock:
+                    self._step_room_doors(dt)
                     mujoco.mj_step(self.model, self.data)
                 if self._viewer is not None:
                     self._viewer.sync()
@@ -232,6 +252,61 @@ class DeliveryBotSimulator:
         with self._lock:
             self.data.ctrl[self._door_top_act] = clamped * DOOR_TOP_RANGE_M
             self.data.ctrl[self._door_bot_act] = clamped * DOOR_BOTTOM_RANGE_M
+
+    # ------------------------------------------------------------------
+    # Room doors (the hotel's, not the robot's) and the viewer camera
+    # ------------------------------------------------------------------
+
+    def set_room_door(self, room: str, open_: bool):
+        """Swing a room's door open (into the room) or closed. Returns
+        immediately; the step loop animates it. Unknown rooms are ignored."""
+        if room in self._room_door_target:
+            self._room_door_target[room] = ROOM_DOOR_OPEN_RAD if open_ else 0.0
+
+    def has_room_door(self, room: str) -> bool:
+        return room in self._room_doors
+
+    def room_door_fraction(self, room: str) -> float:
+        """0.0 closed .. 1.0 fully open; 0.0 for a room without a door."""
+        if room not in self._room_doors:
+            return 0.0
+        with self._lock:
+            return float(self.data.qpos[self._room_doors[room][0]]) / ROOM_DOOR_OPEN_RAD
+
+    def _step_room_doors(self, dt: float):
+        # Caller holds self._lock. Velocity is zeroed so physics never
+        # carries a door past where it was put.
+        for room, (qadr, dadr) in self._room_doors.items():
+            cur = self.data.qpos[qadr]
+            err = self._room_door_target[room] - cur
+            if err:
+                step = ROOM_DOOR_RADPS * dt
+                self.data.qpos[qadr] = cur + max(-step, min(step, err))
+            self.data.qvel[dadr] = 0.0
+
+    def set_camera(self, name: str):
+        """Point the viewer at one of the model's named cameras, or at
+        "follow": a top-down view that tracks the robot (+x to the right, as
+        the corridor plan reads) and stays mouse-zoomable -- unlike a fixed
+        model camera, which the viewer will not let you pan. No-op when
+        headless (no viewer) or the camera does not exist."""
+        if self._viewer is None:
+            return
+        if name == "follow":
+            with self._viewer.lock():
+                cam = self._viewer.cam
+                cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+                cam.trackbodyid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "robot")
+                cam.distance = 4.5
+                cam.elevation = -89.9   # straight down (exactly -90 is degenerate)
+                cam.azimuth = 90.0      # +x right, +y up -- the plan orientation
+            return
+        cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, name)
+        if cam_id < 0:
+            return
+        with self._viewer.lock():
+            self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+            self._viewer.cam.fixedcamid = cam_id
 
     # ------------------------------------------------------------------
     # State readout

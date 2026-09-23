@@ -87,6 +87,23 @@
     <light name="hall_light_near" pos="1.5 0 0.95" dir="0 0 -1" diffuse="0.85 0.78 0.63" ambient="0.25 0.22 0.19" castshadow="false"/>
     <light name="hall_light_far" pos="3.0 1.8 0.95" dir="0 0 -1" diffuse="0.85 0.78 0.63" ambient="0.25 0.22 0.19" castshadow="false"/>
 
+    <!-- Guest POV from inside each room, used by the ARRIVED sequence: the
+         camera stands back in the corner away from the hinge (so the door
+         swings clear of the shot) at eye height, and tracks the robot so it
+         stays framed through the doorway whatever its exact stop. -->
+    <!-- Staff POV from behind the front desk (desk at x=-1.2, top at z~0.5),
+         used by engine.py's loading scene: looks over the counter at the
+         robot's cargo side while it is loaded. -->
+    <camera name="desk_staff" mode="targetbodycom" target="robot" pos="-1.6 0.3 1.3" fovy="60"/>
+    <camera name="room_0803" mode="targetbodycom" target="robot" pos="1.15 -1.5 0.9" fovy="60"/>
+    <camera name="room_0804" mode="targetbodycom" target="robot" pos="2.15 1.5 0.9" fovy="60"/>
+    <camera name="room_1204" mode="targetbodycom" target="robot" pos="4.45 1.15 0.9" fovy="60"/>
+    <camera name="room_1205" mode="targetbodycom" target="robot" pos="1.55 2.15 0.9" fovy="60"/>
+    <light name="room_light_0803" pos="1.0 -1.2 0.95" dir="0 0 -1" diffuse="0.8 0.74 0.6" castshadow="false"/>
+    <light name="room_light_0804" pos="2.0 1.2 0.95" dir="0 0 -1" diffuse="0.8 0.74 0.6" castshadow="false"/>
+    <light name="room_light_1204" pos="4.15 1.0 0.95" dir="0 0 -1" diffuse="0.8 0.74 0.6" castshadow="false"/>
+    <light name="room_light_1205" pos="1.85 2.0 0.95" dir="0 0 -1" diffuse="0.8 0.74 0.6" castshadow="false"/>
+
     <!-- Carpet runner overlay -- thin, non-colliding boxes laid on top of
          the shared grid floor (delivery_bot_v2.xml's plane, unchanged
          material -- other scenes/self-checks still see plain grid). Split
@@ -97,8 +114,8 @@
          (0.9m half-width) to read as its own space, not just a wide bit
          of hallway. -->
     <geom name="carpet_lobby" type="box" pos="-1.0 0 0.001" size="0.9 0.9 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
-    <geom name="carpet_near" type="box" pos="1.5 0 0.001" size="1.7 0.65 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
-    <geom name="carpet_far" type="box" pos="3.0 1.65 0.001" size="0.65 1.75 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
+    <geom name="carpet_near" type="box" pos="1.725 0 0.001" size="1.925 0.65 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
+    <geom name="carpet_far" type="box" pos="3.0 1.375 0.001" size="0.65 2.025 0.001" material="carpet_hotel" contype="0" conaffinity="0"/>
 
     <!-- Front desk -- sits on the corridor's own centerline (y=0), further
          out in the lobby (x=-1.2, was -0.9) so there's real open floor
@@ -128,8 +145,16 @@
     <!-- South wall (y=-0.65 inner face), broken by room 0803's door gap
          (x: 0.8 to 1.2) -->
     <geom name="wall_s_near_a" type="box" pos="0.35 -0.675 0.5" size="0.45 0.025 0.5" material="wall_paint"/>
-    <geom name="wall_s_near_b" type="box" pos="2.25 -0.675 0.5" size="1.05 0.025 0.5" material="wall_paint"/>
-    <geom name="0803" type="box" pos="1.0 -0.675 0.5" size="0.2 0.025 0.5" material="door_panel"/>
+    <!-- runs to the far arm's outer face (x=3.675) so the L's outer corner is
+         closed by the walls themselves; see the note at the end of the file -->
+    <geom name="wall_s_near_b" type="box" pos="2.4375 -0.675 0.5" size="1.2375 0.025 0.5" material="wall_paint"/>
+    <!-- hinged so it can swing into the room on arrival (engine.py ARRIVED
+         sequence); angle is set kinematically by concierge_sim, never
+         collides (the robot stays in the corridor) -->
+    <body name="door_0803" pos="0.8 -0.675 0">
+      <joint name="door_hinge_0803" type="hinge" axis="0 0 -1" range="0 100" limited="true" damping="5"/>
+      <geom name="0803" type="box" pos="0.2 0 0.5" size="0.2 0.025 0.5" material="door_panel" contype="0" conaffinity="0"/>
+    </body>
 
     <!-- Room 0803 interior, visible through the door gap -- non-colliding,
          entirely outside any waypoint path (paths never leave the
@@ -145,7 +170,13 @@
          through), broken by 0804's gap -->
     <geom name="wall_n_near_a" type="box" pos="0.85 0.675 0.5" size="0.95 0.025 0.5" material="wall_paint"/>
     <geom name="wall_n_near_b" type="box" pos="2.275 0.675 0.5" size="0.075 0.025 0.5" material="wall_paint"/>
-    <geom name="0804" type="box" pos="2.0 0.675 0.5" size="0.2 0.025 0.5" material="door_panel"/>
+    <!-- hinged so it can swing into the room on arrival (engine.py ARRIVED
+         sequence); angle is set kinematically by concierge_sim, never
+         collides (the robot stays in the corridor) -->
+    <body name="door_0804" pos="1.8 0.675 0">
+      <joint name="door_hinge_0804" type="hinge" axis="0 0 1" range="0 100" limited="true" damping="5"/>
+      <geom name="0804" type="box" pos="0.2 0 0.5" size="0.2 0.025 0.5" material="door_panel" contype="0" conaffinity="0"/>
+    </body>
 
     <!-- Room 0804 interior -->
     <geom name="room0804_back" type="box" pos="2.0 1.65 0.5" size="0.35 0.025 0.5" material="wall_paint" contype="0" conaffinity="0"/>
@@ -157,9 +188,15 @@
     <!-- ============ Far arm (junction -> dead end), centerline x=3.0 ============ -->
 
     <!-- East wall (x=+3.65 inner face), broken by room 1204's door gap -->
-    <geom name="wall_e_far_a" type="box" pos="3.65 0.35 0.5" size="0.025 0.45 0.5" material="wall_paint"/>
+    <geom name="wall_e_far_a" type="box" pos="3.65 0.05 0.5" size="0.025 0.75 0.5" material="wall_paint"/>
     <geom name="wall_e_far_b" type="box" pos="3.65 2.25 0.5" size="0.025 1.05 0.5" material="wall_paint"/>
-    <geom name="1204" type="box" pos="3.65 1.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
+    <!-- hinged so it can swing into the room on arrival (engine.py ARRIVED
+         sequence); angle is set kinematically by concierge_sim, never
+         collides (the robot stays in the corridor) -->
+    <body name="door_1204" pos="3.65 0.8 0">
+      <joint name="door_hinge_1204" type="hinge" axis="0 0 -1" range="0 100" limited="true" damping="5"/>
+      <geom name="1204" type="box" pos="0 0.2 0.5" size="0.025 0.2 0.5" material="door_panel" contype="0" conaffinity="0"/>
+    </body>
 
     <!-- Room 1204 interior -->
     <geom name="room1204_back" type="box" pos="4.625 1.0 0.5" size="0.025 0.35 0.5" material="wall_paint" contype="0" conaffinity="0"/>
@@ -173,7 +210,13 @@
          junction), broken by 1205's gap -->
     <geom name="wall_w_far_a" type="box" pos="2.35 1.2375 0.5" size="0.025 0.5625 0.5" material="wall_paint"/>
     <geom name="wall_w_far_b" type="box" pos="2.35 2.75 0.5" size="0.025 0.55 0.5" material="wall_paint"/>
-    <geom name="1205" type="box" pos="2.35 2.0 0.5" size="0.025 0.2 0.5" material="door_panel"/>
+    <!-- hinged so it can swing into the room on arrival (engine.py ARRIVED
+         sequence); angle is set kinematically by concierge_sim, never
+         collides (the robot stays in the corridor) -->
+    <body name="door_1205" pos="2.35 1.8 0">
+      <joint name="door_hinge_1205" type="hinge" axis="0 0 1" range="0 100" limited="true" damping="5"/>
+      <geom name="1205" type="box" pos="0 0.2 0.5" size="0.025 0.2 0.5" material="door_panel" contype="0" conaffinity="0"/>
+    </body>
     <!-- was material="wall_paint" -- a Minor finding parked during Task 1's
          review (inherited from the brief's own coordinates, not this
          implementer's error); fixed here as part of this same pass since
@@ -190,19 +233,13 @@
          cross-section -->
     <geom name="wall_end_far" type="box" pos="3.0 3.325 0.5" size="0.675 0.025 0.5" material="wall_paint"/>
 
-    <!-- Outer L-corner fill, south-east: the near-arm's south wall
-         (wall_s_near_b, ends at x=3.3) and the far-arm's east wall
-         (wall_e_far_a, starts at y=-0.1) never actually met -- a real gap
-         inherited from Task 1's original brief coordinates (same root
-         cause as the 1205-door-material Minor above), visible as an open
-         notch at the L's outer corner. This is purely a building-envelope
-         gap, not a nav issue (it sits entirely behind the walls that
-         already block the robot from ever reaching it), but it looks
-         wrong from the top camera and up close. One box closes it exactly:
-         computed from the two walls' actual edges (x from wall_s_near_b's
-         end at 3.3 to wall_e_far_a's outer face at 3.675; y from
-         wall_e_far_a's south end at -0.1 to wall_s_near_a's outer face at
-         -0.7), not eyeballed. -->
-    <geom name="wall_corner_se" type="box" pos="3.4875 -0.4 0.5" size="0.1875 0.3 0.5" material="wall_paint"/>
+    <!-- Outer L-corner: there used to be a filler box here (wall_corner_se)
+         for a gap where wall_s_near_b and wall_e_far_a never met. After the
+         corridor was widened to a 0.65m half-width that box sat INSIDE the
+         aisle -- a 0.37 x 0.6m block in the corner, plus an uncarpeted patch
+         around it, reading from the top camera as a square blocking the L.
+         Both walls now simply run to the outer corner (3.675, -0.7) and
+         the two carpet runners cover the corner, so the L is one clean,
+         unobstructed shape. -->
   </worldbody>
 </mujoco>
