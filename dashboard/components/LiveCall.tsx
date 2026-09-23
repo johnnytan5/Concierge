@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { s } from '../lib/css';
 import { MONO, HATCH, tag } from '../lib/ui';
 import {
@@ -40,6 +40,20 @@ type Props = {
   now: number;
 };
 
+// Per-viewer, cosmetic: which finished call the operator dismissed. A new
+// call has a new id, so it always shows. localStorage can throw (private
+// window, blocked storage), and the screen must work without it.
+const CLEARED_KEY = 'concierge.liveCall.clearedSession';
+function readCleared(): string | null {
+  try { return typeof window === 'undefined' ? null : window.localStorage.getItem(CLEARED_KEY); } catch { return null; }
+}
+function writeCleared(id: string | null) {
+  try {
+    if (id) window.localStorage.setItem(CLEARED_KEY, id);
+    else window.localStorage.removeItem(CLEARED_KEY);
+  } catch { /* storage blocked — the in-memory state still works */ }
+}
+
 function elapsed(fromIso: string, now: number): string {
   const ms = Math.max(0, now - Date.parse(fromIso));
   const total = Math.floor(ms / 1000);
@@ -56,6 +70,37 @@ export default function LiveCall({
   const newest = sessions.length
     ? sessions.reduce((a, b) => (Date.parse(a.started_at) >= Date.parse(b.started_at) ? a : b))
     : null;
+  const [clearedId, setClearedId] = useState<string | null>(readCleared);
+  const clear = (id: string | null) => { setClearedId(id); writeCleared(id); };
+
+  // "Clear last call" (dev): a finished call the operator dismissed gives way
+  // to the empty template, so the screen is clean before the next take.
+  const blank = !live && newest !== null && newest.id === clearedId;
+  if (blank) {
+    const placeholder: SessionRow = {
+      id: '—', agent_id: null, room: null, started_at: new Date(now).toISOString(), ended_at: null,
+    };
+    return (
+      <div style={s('display:flex;flex-direction:column;gap:2px')}>
+        <div style={s('border:2px solid var(--color-divider);padding:20px 22px;display:flex;align-items:center;gap:20px;flex-wrap:wrap')}>
+          <span style={s('display:flex;align-items:center;gap:10px')}>
+            <span style={s('width:13px;height:13px;display:block;background:var(--color-neutral-500)')} />
+            <span style={s('font-family:var(--font-heading);font-weight:800;font-size:15px;letter-spacing:.06em;text-transform:uppercase')}>
+              {dev ? 'no open session' : 'Waiting for a call'}
+            </span>
+          </span>
+          <span style={s('margin-left:auto;display:flex;gap:22px;align-items:baseline;font-family:' + MONO + ';font-size:13px;color:var(--color-neutral-700)')}>
+            <span>0m 00s</span><span>0 {dev ? 'turns' : 'said'}</span><span>0 {dev ? 'tool calls' : 'actions'}</span>
+          </span>
+          {dev && (
+            <button className="btn btn-secondary" onClick={() => clear(null)}>Show last call</button>
+          )}
+        </div>
+        <CallFlow session={placeholder} calls={[]} turns={[]} dev={dev} variant="stage" />
+      </div>
+    );
+  }
+
   const shown = live ?? newest;
 
   if (!shown) {
@@ -147,6 +192,11 @@ export default function LiveCall({
               ? 'No session is open. Showing the most recent one; a new call replaces it here automatically.'
               : 'Nobody is on the line. This is the last call that came in — a new one takes over this screen by itself.'}
           </span>
+          {dev && (
+            <button className="btn btn-secondary" style={s('margin-left:auto')} onClick={() => clear(newest.id)}>
+              Clear last call
+            </button>
+          )}
         </div>
       )}
     </div>

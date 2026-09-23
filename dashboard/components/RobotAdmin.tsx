@@ -75,6 +75,10 @@ export default function RobotAdmin(props: RobotAdminProps) {
   const dev = devOverride !== undefined ? devOverride : props.devMode === true;
   const ready = d.dataState === 'ready';
   const side = navLayout === 'sidebar';
+  // Collapsible for split-screen demos (admin UI on one half, the MuJoCo
+  // viewer on the other): hiding the 190px rail gives the Live call stage
+  // back a quarter of a half-width window.
+  const [navOpen, setNavOpen] = useState(true);
 
   const closeDialog = () => { setDialog(null); setDraft(null); };
   const oid = (id: string | null) =>
@@ -407,7 +411,10 @@ export default function RobotAdmin(props: RobotAdminProps) {
   });
 
   const conn = {
-    show: d.connection !== 'live' && ready,
+    // Only a real disconnect earns a banner. 'stale' (channels still
+    // subscribing) lasts a second or two at load and is shown by the header's
+    // status dot alone — a banner for it just flickered in mid-demo.
+    show: d.connection === 'offline' && ready,
     style: 'display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:11px 20px;border-bottom:2px solid ' +
       (d.connection === 'offline' ? 'var(--color-text)' : 'var(--color-divider)') +
       ';background:' + (d.connection === 'offline' ? 'var(--color-neutral-200)' : 'var(--color-neutral-100)') +
@@ -415,17 +422,28 @@ export default function RobotAdmin(props: RobotAdminProps) {
         ? ';background-image:' + HATCH + ';background-size:100% 6px;background-repeat:no-repeat;' +
           'background-position:top left;padding-top:15px'
         : ''),
-    title: d.connection === 'offline' ? (dev ? 'disconnected' : 'Connection lost') : (dev ? 'stale' : 'Falling behind'),
-    body: d.connection === 'offline'
-      ? (dev ? 'realtime channel closed — values below are the last known payload'
-             : 'These numbers stopped updating. Robots on the floor are unaffected.')
-      : (dev ? 'no payload for >45s — expected on every table write'
-             : 'Last update was a while ago. Positions may have moved since.'),
+    title: dev ? 'disconnected' : 'Connection lost',
+    body: dev ? 'realtime channel closed — values below are the last known payload'
+              : 'These numbers stopped updating. Robots on the floor are unaffected.',
   };
 
   return (
     <div style={s('font-family:var(--font-body);color:var(--color-text);background:var(--color-bg)')}>
       <header style={s('display:flex;align-items:center;gap:16px;padding:13px 20px;border-bottom:2px solid var(--color-divider);flex-wrap:wrap')}>
+        {side && (
+          <button
+            onClick={() => setNavOpen(!navOpen)}
+            aria-label={navOpen ? 'Hide menu' : 'Show menu'}
+            aria-expanded={navOpen}
+            title={navOpen ? 'Hide menu' : 'Show menu'}
+            style={s('width:32px;height:28px;flex:none;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;padding:0;cursor:pointer;' +
+              'border:1px solid var(--color-divider);background-color:' + (navOpen ? 'var(--color-surface)' : 'var(--color-text)'))}
+          >
+            {[0, 1, 2].map((i) => (
+              <span key={i} style={s('display:block;width:14px;height:2px;background:' + (navOpen ? 'var(--color-text)' : 'var(--color-bg)'))} />
+            ))}
+          </button>
+        )}
         <div style={s('font-family:var(--font-heading);font-weight:800;font-size:18px;letter-spacing:-.015em')}>ROOM SERVICE OPS</div>
         {dev && SUPABASE_HOST && (
           <div style={s('font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-neutral-600);border-left:1px solid var(--color-divider);padding-left:16px;font-family:' + MONO)}>
@@ -464,7 +482,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
       )}
 
       <div style={s((side ? 'display:flex;align-items:stretch;' : 'display:flex;flex-direction:column;') + 'min-height:calc(100vh - 54px)')}>
-        <nav style={s(side
+        {(!side || navOpen) && <nav style={s(side
           ? 'width:190px;flex:none;display:flex;flex-direction:column;border-right:2px solid var(--color-divider);background:var(--color-surface)'
           : 'display:flex;flex-wrap:wrap;border-bottom:2px solid var(--color-divider);background:var(--color-surface)')}>
           {tabDefs.map(([id, label, count]) => (
@@ -473,7 +491,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
               <span style={s('margin-left:auto;font-family:' + MONO + ';font-size:11px;font-weight:600;opacity:.72')}>{count}</span>
             </button>
           ))}
-        </nav>
+        </nav>}
 
         <main style={s('flex:1;min-width:0;padding:20px 20px 40px')}>
           {d.dataState === 'loading' && (
@@ -522,7 +540,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                 title={dev ? 'Front desk line' : 'Live call'}
                 sub={dev
                   ? 'newest open voice_sessions row · transcript_turns + tool_call_events over realtime'
-                  : 'What the assistant is doing right now, as it happens'}
+                  : ''}
                 subStyle={subStyle}
               />
               <div style={s('display:flex;flex-direction:column;gap:14px')}>
@@ -544,7 +562,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
             <div>
               <SectionHead
                 title={dev ? 'Fleet status' : 'Robots'}
-                sub={dev ? 'public.robots · realtime · mirrored ~1 Hz · read-only' : 'Live from the floor, updating continuously'}
+                sub={dev ? 'public.robots · realtime · mirrored ~1 Hz · read-only' : ''}
                 subStyle={subStyle}
               />
               <div style={s('display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:2px;background:var(--color-divider);border:2px solid var(--color-divider)')}>
@@ -650,7 +668,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
             <div>
               <SectionHead
                 title={dev ? 'Dispatch log' : 'Orders'}
-                sub={dev ? 'public.deliveries order by created_at desc · never deleted · read-only' : 'Every order tonight, newest first'}
+                sub={dev ? 'public.deliveries order by created_at desc · never deleted · read-only' : ''}
                 subStyle={subStyle}
               />
               <div style={s('display:flex;gap:2px;margin-bottom:12px;flex-wrap:wrap')}>
@@ -665,7 +683,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                       {(dev
                         ? ['task_id', 'room', 'items', 'phase', 'priority', 'robot', 'created', 'dispatched', 'arrived', 'desk→door']
                         : ['Order', 'Room', 'Items', 'Status', 'Priority', 'Robot', 'Placed', 'Sent', 'Delivered', 'Took']
-                      ).map((h, n) => <th key={n}>{h}</th>)}
+                      ).map((h, n) => <th key={n} className={NARROW_HIDDEN_COLS.includes(n) ? 'col-wide-only' : undefined}>{h}</th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -686,13 +704,13 @@ export default function RobotAdmin(props: RobotAdminProps) {
                         <td style={s('font-family:' + MONO + ';font-size:12px;white-space:nowrap')}>{x.id}</td>
                         <td style={s('font-weight:600')}>{x.room}</td>
                         <td style={s('font-size:13px;min-width:170px')}>{x.items}</td>
-                        <td><span style={s(x.tag)}>{x.phase}</span></td>
-                        <td style={s('font-size:12px;text-transform:uppercase;letter-spacing:.04em')}>{x.priority}</td>
-                        <td style={s('font-family:' + MONO + ';font-size:12px')}>{x.robot}</td>
-                        <td style={s('font-family:' + MONO + ';font-size:12px;color:var(--color-neutral-700)')}>{x.created}</td>
-                        <td style={s('font-family:' + MONO + ';font-size:12px;color:var(--color-neutral-700)')}>{x.dispatched}</td>
+                        <td style={s('white-space:nowrap')}><span style={s(x.tag)}>{x.phase}</span></td>
+                        <td className="col-wide-only" style={s('font-size:12px;text-transform:uppercase;letter-spacing:.04em')}>{x.priority}</td>
+                        <td style={s('font-family:' + MONO + ';font-size:12px;white-space:nowrap')}>{x.robot}</td>
+                        <td className="col-wide-only" style={s('font-family:' + MONO + ';font-size:12px;color:var(--color-neutral-700)')}>{x.created}</td>
+                        <td className="col-wide-only" style={s('font-family:' + MONO + ';font-size:12px;color:var(--color-neutral-700)')}>{x.dispatched}</td>
                         <td style={s('font-family:' + MONO + ';font-size:12px;color:var(--color-neutral-700)')}>{x.arrived}</td>
-                        <td style={s('font-family:' + MONO + ';font-size:12px')}>{x.dur}</td>
+                        <td style={s('font-family:' + MONO + ';font-size:12px;white-space:nowrap')}>{x.dur}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -707,7 +725,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                 title={dev ? 'Voice call log' : 'Guest calls'}
                 sub={dev
                   ? 'public.voice_sessions · tool_call_events + transcript_turns grouped by session_id'
-                  : 'Every call the assistant handled. Open one to see exactly what it did.'}
+                  : ''}
                 subStyle={subStyle}
               />
               <div style={s('display:flex;gap:2px;margin-bottom:12px;flex-wrap:wrap')}>
@@ -785,7 +803,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
             <div>
               <SectionHead
                 title={dev ? 'Front desk escalations' : 'Needs your attention'}
-                sub={dev ? 'public.frontdesk_escalations · resolve via admin_api' : 'Calls the assistant handed to the desk'}
+                sub={dev ? 'public.frontdesk_escalations · resolve via admin_api' : ''}
                 subStyle={subStyle}
               />
               <div style={s('display:flex;gap:2px;margin-bottom:12px;flex-wrap:wrap')}>
@@ -846,7 +864,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
             <div>
               <div style={s('display:flex;align-items:baseline;gap:12px;margin-bottom:14px;flex-wrap:wrap')}>
                 <h4 style={s('margin:0')}>Inventory</h4>
-                <span style={s(subStyle)}>{dev ? 'public.inventory_items · reads live · writes via admin_api' : 'What guests can order right now'}</span>
+                {dev && <span style={s(subStyle)}>public.inventory_items · reads live · writes via admin_api</span>}
                 <button
                   onClick={() => {
                     setActionError(null);
@@ -933,7 +951,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                     <span style={s('font-size:11px;font-family:' + MONO + ';color:var(--color-neutral-700);flex:1;min-width:240px')}>
                       {dev
                         ? 'public.inventory_audit_log · one row per item per stock change, with before/after'
-                        : 'Every stock change, and what caused it'}
+                        : ''}
                     </span>
                   </div>
                   <div style={s('overflow-x:auto')}>
@@ -1119,11 +1137,15 @@ export default function RobotAdmin(props: RobotAdminProps) {
   );
 }
 
+// Deliveries columns dropped at split-screen width (Priority, Placed, Sent):
+// the rest still answers "what went where, and is it there yet".
+const NARROW_HIDDEN_COLS = [4, 6, 7];
+
 function SectionHead({ title, sub, subStyle }: { title: string; sub: string; subStyle: string }) {
   return (
     <div style={s('display:flex;align-items:baseline;gap:12px;margin-bottom:14px;flex-wrap:wrap')}>
       <h4 style={s('margin:0')}>{title}</h4>
-      <span style={s(subStyle)}>{sub}</span>
+      {sub && <span style={s(subStyle)}>{sub}</span>}
     </div>
   );
 }

@@ -72,7 +72,7 @@ export default function CallControl({ dev }: Props) {
   const roomOk = /^[A-Za-z0-9-]{1,10}$/.test(room.trim());
 
   return (
-    <div style={s('border:2px solid var(--color-divider);background:var(--color-surface)' +
+    <div style={s('border:2px solid var(--color-divider);background-color:var(--color-surface)' +
       (live ? ';background-image:' + HATCH + ';background-size:100% 4px;background-repeat:no-repeat;background-position:top left' : ''))}>
       <div style={s('padding:16px 20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap')}>
         <span style={s('font-family:var(--font-heading);font-weight:800;font-size:13px;letter-spacing:.1em;text-transform:uppercase')}>
@@ -100,11 +100,11 @@ export default function CallControl({ dev }: Props) {
             >
               {busy ? 'Connecting…' : 'Answer call'}
             </button>
-            <span style={s('font-size:12px;color:var(--color-neutral-700);max-width:44ch')}>
-              {dev
-                ? 'Launches the agent with --room; it opens the mic on the machine running admin_api.'
-                : 'Opens the line and starts listening on this machine’s microphone.'}
-            </span>
+            {dev && (
+              <span style={s('font-size:12px;color:var(--color-neutral-700);max-width:44ch')}>
+                Launches the agent with --room; it opens the mic on the machine running admin_api.
+              </span>
+            )}
           </>
         )}
 
@@ -133,6 +133,12 @@ export default function CallControl({ dev }: Props) {
               <span style={s('font-family:' + MONO + ';font-size:11px;color:var(--color-neutral-700)')}>pid {status.pid}</span>
             )}
           </>
+        )}
+
+        {status?.finishing && (
+          <span style={s('margin-left:auto')} className="tag">
+            {dev ? 'guest hung up · engine alive until robot is idle' : 'Call ended · robot finishing delivery'}
+          </span>
         )}
 
         {status && !status.running && status.exit_code !== undefined && status.exit_code !== null && (

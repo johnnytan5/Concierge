@@ -287,3 +287,58 @@ export function medianDeskToDoor(deliveries: DeliveryRow[]): string {
   if (m === null) return '—';
   return `${Math.floor(m / 60)}m ${String(Math.round(m % 60)).padStart(2, '0')}s`;
 }
+
+type OutcomeCall = { tool_name: string; arguments: Record<string, unknown> | null; result?: unknown };
+export type Outcome = { key: string; label: string; alert?: boolean };
+
+/**
+ * Everything a call produced, one row each — an order AND an escalation AND
+ * an answered question can all come out of the same call, and the flow
+ * chart's Result column used to show only the order.
+ *
+ * Order contents come from what dispatch_delivery actually sent (not what
+ * was asked for), then amend_delivery's add/remove on top.
+ */
+export function outcomesFor(calls: OutcomeCall[], dev: boolean): Outcome[] {
+  const orders = new Map<string, string[]>();
+  const escalations: string[] = [];
+  const topics = new Set<string>();
+  const arr = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+
+  for (const c of calls) {
+    const a = c.arguments ?? {};
+    const r = (c.result && typeof c.result === 'object' ? c.result : {}) as Record<string, unknown>;
+    if (c.tool_name === 'dispatch_delivery' && typeof r.task_id === 'string' && r.task_id) {
+      const sent = Array.isArray(r.dispatched_items)
+        ? r.dispatched_items.map((i) => String((i as { name?: unknown })?.name ?? i))
+        : arr(a.items);
+      orders.set(r.task_id, sent);
+    } else if (c.tool_name === 'amend_delivery' && typeof a.task_id === 'string' && orders.has(a.task_id)) {
+      const items = orders.get(a.task_id)!;
+      items.push(...arr(a.add));
+      for (const x of arr(a.remove)) {
+        const i = items.indexOf(x);
+        if (i >= 0) items.splice(i, 1);
+      }
+    } else if (c.tool_name === 'escalate_to_frontdesk') {
+      escalations.push(String(a.reason ?? ''));
+    } else if (c.tool_name === 'hotel_info' && typeof a.topic === 'string') {
+      topics.add(dev ? a.topic : a.topic.replace(/_/g, ' '));
+    }
+  }
+
+  const short = (t: string) => (t.length > 60 ? t.slice(0, 57).trimEnd() + '…' : t);
+  const out: Outcome[] = [];
+  for (const [id, items] of orders) {
+    out.push({
+      key: 'o' + id,
+      label: dev ? `${id} · ${items.join(', ')}` : `Order ${id.toUpperCase()} · ${formatItems(items)}`,
+    });
+  }
+  escalations.forEach((r, i) =>
+    out.push({ key: 'e' + i, label: (dev ? 'escalation · ' : 'Front desk · ') + short(r), alert: true }));
+  if (topics.size) {
+    out.push({ key: 'i', label: (dev ? 'hotel_info · ' : 'Answered · ') + [...topics].join(', ') });
+  }
+  return out;
+}

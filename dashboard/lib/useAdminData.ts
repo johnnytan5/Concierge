@@ -39,9 +39,8 @@ export function useAdminData() {
       : all.some((t) => t.status === 'loading') ? 'loading'
       : 'ready';
 
-  // A ticker so "stale" can be reached by the clock alone. Realtime going
-  // quiet produces no event to re-render on, so without this a frozen feed
-  // would keep claiming it was live.
+  // A 1s ticker for everything that renders elapsed time (call timers,
+  // "updated 3s ago").
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -52,10 +51,15 @@ export function useAdminData() {
   const anyOffline = all.some((t) => t.channel === 'offline');
   const allConnecting = all.every((t) => t.channel === 'connecting');
 
+  // Stale means "the channels have not come up yet", not "nothing changed
+  // lately". It used to also fire after 45s without any row changing, but a
+  // healthy, subscribed channel on a quiet floor produces no events, so that
+  // rule flagged every lull in the demo as "Falling behind". A dropped
+  // channel is caught directly: Supabase reports CHANNEL_ERROR / TIMED_OUT /
+  // CLOSED, which is 'offline' above.
   const connection: 'live' | 'stale' | 'offline' =
     anyOffline ? 'offline'
       : allConnecting ? 'stale'
-      : newestLoad > 0 && now - newestLoad > 45_000 ? 'stale'
       : 'live';
 
   const refetchAll = () => all.forEach((t) => t.refetch());

@@ -14,7 +14,7 @@ import {
   phaseStep, humanPhase, formatItems, duration, ago,
   formatPrice, median, medianDeskToDoor, isTerminal, PHASE_STEPS,
   pickLiveSession, replyLatencyMs, latencyLabel, roomFromCalls, guestLabel,
-  argPairsFor, roomForCall,
+  argPairsFor, roomForCall, outcomesFor,
 } from './format.ts';
 
 test('phaseStep maps every engine phase onto a real step or none', () => {
@@ -237,4 +237,23 @@ test('guestLabel names the room when we know it', () => {
   assert.equal(guestLabel('1204', true), 'guest · 1204');
   assert.equal(guestLabel(null, false), 'Guest');
   assert.equal(guestLabel(null, true), 'guest');
+});
+
+test('outcomesFor lists every outcome of a call, not just the order', () => {
+  const calls = [
+    { tool_name: 'check_menu', arguments: { items: ['towel'] }, result: [] },
+    { tool_name: 'dispatch_delivery', arguments: { room: '1204', items: ['towel', 'shampoo'] },
+      result: { task_id: '543a3e29', dispatched_items: [{ name: 'towel' }] } },
+    { tool_name: 'amend_delivery', arguments: { task_id: '543a3e29', add: ['mee goreng'] }, result: {} },
+    { tool_name: 'escalate_to_frontdesk', arguments: { reason: 'Aircon is broken', room: '1204' }, result: { ack: true } },
+    { tool_name: 'hotel_info', arguments: { topic: 'late_checkout' }, result: {} },
+  ];
+  assert.deepEqual(outcomesFor(calls, false), [
+    // what was actually SENT (shampoo was refused), plus the amendment
+    { key: 'o543a3e29', label: 'Order 543A3E29 · 1× towel, 1× mee goreng' },
+    { key: 'e0', label: 'Front desk · Aircon is broken', alert: true },
+    { key: 'i', label: 'Answered · late checkout' },
+  ]);
+  // a refused dispatch (no task_id) is not an order
+  assert.deepEqual(outcomesFor([{ tool_name: 'dispatch_delivery', arguments: {}, result: { task_id: null } }], false), []);
 });

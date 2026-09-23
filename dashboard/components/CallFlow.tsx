@@ -2,9 +2,9 @@
 
 import React from 'react';
 import { s } from '../lib/css';
-import { MONO, ALERT_CHIP } from '../lib/ui';
+import { MONO, ALERT_CHIP, HATCH } from '../lib/ui';
 import {
-  hhmmss, replyLatencyMs, latencyLabel, median, guestLabel, argPairsFor, roomForCall,
+  hhmmss, replyLatencyMs, latencyLabel, median, guestLabel, argPairsFor, roomForCall, outcomesFor,
 } from '../lib/format';
 import { TOOL_HUMAN, TOOL_GROUP, ARG_HUMAN } from '../lib/vocab';
 import type { ToolCallRow, TranscriptRow, SessionRow } from '../lib/types';
@@ -134,13 +134,17 @@ function Node({ label, lit, count, alert, z }: {
   label: string; lit: boolean; count?: number; alert?: boolean; z: Z;
 }) {
   const base =
-    'padding:' + z.nodePad + ';border:1px solid var(--color-divider);font-family:' + MONO +
-    ';font-size:' + z.nodeText + ';display:flex;align-items:center;gap:8px;white-space:nowrap;';
+    'padding:' + z.nodePad + ';border-width:1px;border-style:solid;border-color:var(--color-divider);font-family:' + MONO +
+    ';font-size:' + z.nodeText + ';display:flex;align-items:center;gap:8px;overflow-wrap:anywhere;';
+  // Lit = solid ink, unlit = faint dashed outline, so several lit nodes read
+  // as several things happening at a glance. Before, a lit node was a shade
+  // of grey away from an unlit one and only the (inverted) escalation stood
+  // out, which read as "the call did one thing". Escalations additionally
+  // carry the hatch strip — urgency without red, which is live-motion only.
   const style = !lit
-    ? base + 'background:var(--color-surface);color:var(--color-neutral-600)'
-    : alert
-      ? base + 'background:var(--color-text);color:var(--color-bg);font-weight:700'
-      : base + 'background:var(--color-neutral-200);color:var(--color-text);font-weight:600';
+    ? base + 'background-color:transparent;border-style:dashed;color:var(--color-neutral-500)'
+    : base + 'background-color:var(--color-text);border-color:var(--color-text);color:var(--color-bg);font-weight:700' +
+      (alert ? ';background-image:' + HATCH + ';background-size:100% 4px;background-repeat:no-repeat;background-position:top left' : '');
   return (
     <div style={s(style)}>
       <span>{label}</span>
@@ -202,9 +206,7 @@ export default function CallFlow({
     groupCounts.set(g, (groupCounts.get(g) ?? 0) + 1);
   }
 
-  const taskIds = Array.from(
-    new Set(calls.map((c) => taskIdFrom(c)).filter(Boolean) as string[]),
-  );
+  const outcomes = outcomesFor(calls, dev);
   const escalated = (groupCounts.get('escalate') ?? 0) > 0;
 
   // Call-level latency summary: how fast the agent answered, across turns.
@@ -237,15 +239,9 @@ export default function CallFlow({
             </Column>
             <div aria-hidden="true" style={s('display:flex;align-items:center;padding:0 4px;font-family:' + MONO + ';color:var(--color-neutral-500);font-size:12px')}>&gt;&gt;</div>
             <Column label={dev ? 'outcome' : 'Result'} z={z}>
-              {taskIds.length > 0 ? (
-                taskIds.map((t) => (
-                  <Node key={t} z={z} label={dev ? t : 'Order ' + t.toUpperCase()} lit />
-                ))
-              ) : (
-                (groupCounts.get('info') ?? 0) > 0
-                  ? <Node z={z} label={dev ? 'answered, no task' : 'Question answered'} lit />
-                  : <Node z={z} label={dev ? 'no task created' : 'No order placed'} lit={false} />
-              )}
+              {outcomes.length > 0
+                ? outcomes.map((o) => <Node key={o.key} z={z} label={o.label} lit alert={o.alert} />)
+                : <Node z={z} label={dev ? 'no task created' : 'No order placed'} lit={false} />}
             </Column>
           </div>
         </Panel>
@@ -274,7 +270,7 @@ export default function CallFlow({
               if (e.kind === 'turn') {
                 const isGuest = e.turn.role === 'guest';
                 return (
-                  <div key={'t' + e.turn.id} style={s('background:var(--color-bg);display:flex;gap:14px;padding:' + z.rowPad + ';align-items:baseline')}>
+                  <div key={'t' + e.turn.id} style={s('background:var(--color-bg);display:flex;flex-wrap:wrap;gap:14px;padding:' + z.rowPad + ';align-items:baseline')}>
                     <span style={s('width:' + z.gutter + 'px;flex:none;font-family:' + MONO + ';font-size:' + z.metaText + ';color:var(--color-neutral-600)')}>
                       {hhmmss(e.turn.created_at)}
                     </span>
@@ -292,7 +288,7 @@ export default function CallFlow({
               const c = e.call;
               const isEscalation = c.tool_name === 'escalate_to_frontdesk';
               return (
-                <div key={'c' + c.id} style={s('background:var(--color-bg);display:flex;gap:14px;padding:' + z.rowPad + ';align-items:flex-start')}>
+                <div key={'c' + c.id} style={s('background:var(--color-bg);display:flex;flex-wrap:wrap;gap:14px;padding:' + z.rowPad + ';align-items:flex-start')}>
                   <span style={s('width:' + z.gutter + 'px;flex:none;font-family:' + MONO + ';font-size:' + z.metaText + ';color:var(--color-neutral-600);padding-top:2px')}>
                     {hhmmss(c.created_at)}
                   </span>

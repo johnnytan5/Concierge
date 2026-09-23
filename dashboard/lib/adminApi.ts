@@ -105,6 +105,8 @@ export const reopenEscalation = (id: string) =>
  */
 export type CallStatus = {
   running: boolean;
+  /** Guest hung up (end_call); the process lives on until the robot is done. */
+  finishing?: boolean;
   room: string | null;
   pid?: number;
   started_at?: string;

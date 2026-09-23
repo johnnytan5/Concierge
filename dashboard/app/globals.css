@@ -230,6 +230,9 @@ textarea.input { min-height: 90px; resize: vertical; }
   padding: var(--space-2);
   border-bottom: 1px solid var(--color-divider);
 }
+/* Split-screen demo (dashboard on one half, MuJoCo viewer on the other):
+   drop the table columns that matter least rather than scroll sideways. */
+@media (max-width: 1000px) { .col-wide-only { display: none; } }
 .table tbody tr:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
 
 /* — dialog — */
