@@ -143,7 +143,10 @@ _BASE_PROMPT = (
     "tell_guest, follow it. Never claim a delivery is done, in "
     "progress, or arrived unless a tool told you so. Use check_delivery_status, "
     "amend_delivery, recall_robot, get_fleet_state and announce_arrival for "
-    "deliveries already under way. Dietary tags are for answering the "
+    "deliveries already under way. For 'where is my order?' / 'what's the "
+    "status?', call check_delivery_status with the guest's room -- you "
+    "always know it; never ask for or talk about an order or task id. "
+    "Dietary tags are for answering the "
     "guest's own dietary questions — bring them up only if the guest "
     "mentions a dietary need, and never state an ingredient the MENU does "
     "not list. When the guest says yes or 'send it', dispatch right away "
@@ -284,6 +287,18 @@ def agent_definition(api_key: str, room: str | None = None) -> dict:
             # ("towels to twelve oh four"), and it is the single term most
             # worth getting right on this call.
             "keyterms": (KEYTERMS + [room]) if room and room not in KEYTERMS else KEYTERMS,
+            # How long a pause counts as "the guest has finished". Left null
+            # (adaptive defaults), a dry run cut "Oh yeah, I also wanted to ask
+            # about late check-in" at "Oh yeah," -- the model answered the
+            # fragment ("Anything else?") and the real question was lost.
+            # Longer silence costs ~0.5s per turn; being cut off costs the call.
+            "turn_detection": {
+                "vad_threshold": 0.5,
+                "min_silence": 900,     # ms of silence when confident the turn ended
+                "max_silence": 2400,    # ms: end the turn regardless after this
+                "interrupt_response": True,
+                "interruption_delay": 100,
+            },
         },
         "tools": SESSION_TOOLS,
     }

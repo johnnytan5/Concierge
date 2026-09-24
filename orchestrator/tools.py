@@ -195,7 +195,7 @@ SESSION_TOOLS = [
     {
         "type": "function",
         "name": "check_delivery_status",
-        "description": "Look up the phase, position, and ETA of a task by id or room.",
+        "description": "Where the guest's delivery is right now (still being loaded, on the way, at the door) and its ETA. Pass the room -- no task id is needed.",
         "parameters": {
             "type": "object",
             "properties": {
