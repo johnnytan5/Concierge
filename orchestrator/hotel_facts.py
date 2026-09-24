@@ -15,13 +15,13 @@ HOTEL_FACTS = {
     # fee must come back with it rather than depend on a second lookup.
     "check_in_out": "Check-in from 3pm, check-out by 12 noon. Early check-in "
                     "depends on availability — the front desk can confirm on the day. "
-                    "Late check-out is $30 per extra hour after 12 noon, up to 5pm at "
-                    "the latest (e.g. 3pm = 3 hours = $90; 5pm = $150). On request, "
-                    "subject to availability.",
-    "late_checkout": "Late check-out is $30 per extra hour after the 12 noon "
-                     "check-out, up to 5pm at the latest (e.g. 3pm = 3 hours = $90; "
-                     "5pm = $150). Later than 5pm is not possible. On request, "
-                     "subject to availability.",
+                    "Late check-out: $30 for each extra hour after 12 noon. The latest "
+                    "is 5pm, which is 5 extra hours, $150. So 2pm = $60, 3pm = $90. "
+                    "On request, subject to availability.",
+    "late_checkout": "Late check-out: $30 for each extra hour after the 12 noon "
+                     "check-out. The latest is 5pm, which is 5 extra hours, $150 -- "
+                     "later than 5pm is not possible. So 2pm = $60, 3pm = $90. On "
+                     "request, subject to availability.",
     "facilities": "Lobby, front desk and café on the ground floor. Gym on level 3, "
                   "open 6am to 10pm. Pool on level 5, open 7am to 9pm. "
                   "Restaurant on level 2: breakfast 6:30 to 10:30am, dinner 6 to 10pm. "

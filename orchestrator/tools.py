@@ -378,7 +378,14 @@ class ToolHandlers:
         # Per-room estimate from that room's real path length — the far wing
         # is genuinely farther than the near one.
         return {"task_id": task_id, "eta_seconds": eta_seconds_for(room),
-                "dispatched_items": dispatched, "unavailable_items": unavailable}
+                "dispatched_items": dispatched, "unavailable_items": unavailable,
+                # Without this the model assumed the robot had already left
+                # and told the guest "on the way, about a minute out" while it
+                # was still at the counter waiting to be loaded.
+                "status": "waiting at the front desk to be loaded",
+                "tell_guest": "It is being loaded at the front desk now and leaves as soon as staff "
+                              "load it; eta_seconds is the trip once it sets off. Do not say it is "
+                              "already on the way."}
 
     def deliver_parcel(self, room, source, description="food order"):
         """A delivery-app order dropped at the front desk, carried up by the
@@ -401,10 +408,14 @@ class ToolHandlers:
         if live and live["phase"] in ("QUEUED", "COLLECTING"):
             self._q.put({"cmd": "amend", "task_id": live["task_id"], "add": [label],
                          "remove": [], "new_room": None})
+            already = ", ".join(i for i in live.get("items", []) if i != label) or "their order"
             return {"task_id": live["task_id"], "eta_seconds": eta_seconds_for(room),
                     "dispatched_items": [{"name": label}], "joined_existing_order": True,
-                    "waiting_for": "the rider to drop it at the front desk; it goes up in the "
-                                   "same trip as the order already waiting there"}
+                    "waiting_for": "the rider to drop it at the front desk",
+                    "tell_guest": f"The {label} goes up together with the {already} in ONE trip: "
+                                  f"the robot is still at the front desk, and staff load both "
+                                  f"before it leaves. Say that -- not that anything is already "
+                                  f"on its way."}
         task_id = uuid.uuid4().hex[:8]
         self._q.put({"cmd": "dispatch", "task_id": task_id, "room": room,
                      "items": [label], "priority": "normal"})
@@ -488,7 +499,11 @@ class ToolHandlers:
         answer = HOTEL_FACTS.get(topic)
         if answer is None:
             return {"error": "unknown_topic", "topics": list(HOTEL_FACTS)}
-        return {"topic": topic, "answer": answer}
+        # tell_guest: in a replay the model once quoted "$15/hour up to 2pm"
+        # with this exact answer in hand. Make "use these figures" explicit.
+        return {"topic": topic, "answer": answer,
+                "tell_guest": "Give the guest this answer with its exact figures -- do not "
+                              "round, change or invent any price, time or limit."}
 
     def end_call(self):
         self.end_requested = True
