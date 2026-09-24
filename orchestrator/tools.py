@@ -4,6 +4,7 @@ handler either puts one command on task_engine's cmd_queue or reads its
 shared `state` dict, and returns immediately — never waits on the robot
 (CLAUDE.md constraint 2).
 """
+import inspect
 import re
 import time
 import uuid
@@ -547,12 +548,29 @@ class ToolHandlers:
         return {"ack": True, "room": room}
 
     def dispatch(self, name, arguments):
-        """Look up and call a handler by the tool name the agent sent in tool.call."""
+        """Look up and call a handler by the tool name the agent sent in tool.call.
+
+        Never raises. The model sometimes invents arguments ("time": "2pm" on
+        an escalation); fn(**arguments) then raised TypeError, nothing was
+        recorded, and the voice session sat waiting on a result that never
+        made sense. Unknown arguments are dropped (and noted), and any
+        handler error comes back as a result the model can recover from --
+        and still lands in tool_call_events so the dashboard shows it."""
         fn = getattr(self, name, None)
+        arguments = dict(arguments or {})
         if fn is None:
             result = {"error": f"unknown_tool:{name}"}
         else:
-            result = fn(**arguments)
+            params = inspect.signature(fn).parameters
+            dropped = {k: arguments.pop(k) for k in list(arguments) if k not in params}
+            try:
+                result = fn(**arguments)
+            except Exception as e:  # noqa: BLE001 - a tool error must not stall the call
+                result = {"error": f"{type(e).__name__}: {e}"}
+            if dropped:
+                print(f"[tools] {name}: ignored unknown arguments {dropped}")
+                if isinstance(result, dict):
+                    result = {**result, "ignored_arguments": sorted(dropped)}
         # A readable sentence for the dashboard's staff view, plus the
         # structured return for dev view — not str(result) for both.
         inventory.insert_tool_call_event(
@@ -793,6 +811,11 @@ if __name__ == "__main__":
         assert h.deliver_parcel("0803", "Grab")["task_id"] != "t9"
         assert summarize_result("deliver_parcel", {"room": "1204", "source": "Uber Eats"}, parcel) \
             == "Robot booked to take the Uber Eats food order up to room 1204 once it reaches the desk."
+
+        # invented arguments are dropped, not a crash; a raising handler is a result
+        esc = h.dispatch("escalate_to_frontdesk", {"reason": "late checkout 2pm", "room": "1204", "time": "2pm"})
+        assert esc["ack"] is True and esc["ignored_arguments"] == ["time"], esc
+        assert "error" in h.dispatch("check_delivery_status", {"task_id": 12345})
 
         assert h.dispatch("end_call", {})["ack"] is True and h.end_requested
         assert summarize_result("end_call", {}, {"ack": True}) == "Call ended."

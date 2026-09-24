@@ -94,7 +94,14 @@ LLM_BASE_URL = "https://openrouter.ai/api/v1"
 # tool call (100-275 hidden tokens) and the guest hears dead air; with it,
 # first token ~1s and it says "let me check" on its own. Measured
 # 2026-09-23. /no_think and chat_template_kwargs do NOT work via OpenRouter.
-LLM_MODEL = "qwen/qwen3.8-flash@preset/concierge"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
+# The bare preset, NOT "qwen/qwen3.8-flash@preset/concierge": pinning the
+# model only borrows the preset's settings, so its fallback list never runs.
+# Measured 2026-09-24: Alibaba (qwen3.8-flash's only host) returned 429
+# "rate-limited upstream" from a shared pool, and a live escalation arrived
+# 87s late while AssemblyAI retried. With the bare preset, a 429 on Qwen
+# falls through to the next model in the preset (gpt-6-luna, then deepseek),
+# reasoning still off -- checked by blocking Alibaba on a test request.
+LLM_MODEL = "@preset/concierge"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
                                     # live 2026-09-11: correct tool-calling on a multi-item
                                     # dispatch_delivery request, standalone against OpenRouter
 USE_BYO_LLM = True  # via OpenRouter (OPENROUTER_API_KEY in .env), not AssemblyAI's own
