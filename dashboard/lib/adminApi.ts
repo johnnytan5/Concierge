@@ -12,6 +12,15 @@
 const BASE =
   process.env.NEXT_PUBLIC_ADMIN_API_URL?.replace(/\/$/, '') ?? 'http://localhost:8000';
 
+/**
+ * The hosted web demo (Vercel) has no admin_api: that is a Python process on
+ * the operator's laptop. With NEXT_PUBLIC_DEMO_MODE=1 the laptop-only controls
+ * are hidden and any write explains itself instead of failing to reach
+ * localhost. (Web calls and the in-browser robot replace these later — see
+ * docs/WEB-DEMO-PLAN.md.)
+ */
+export const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === '1';
+
 /** Thrown for any non-2xx, carrying the status so callers can spot a 401. */
 export class AdminApiError extends Error {
   status: number;
@@ -27,6 +36,9 @@ async function call<T>(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   body?: unknown,
 ): Promise<T> {
+  if (DEMO_MODE) {
+    throw new AdminApiError(0, 'This is the hosted web demo — staff controls run on the front-desk laptop.');
+  }
   let res: Response;
   try {
     res = await fetch(`${BASE}${path}`, {

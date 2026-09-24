@@ -544,7 +544,7 @@ export default function RobotAdmin(props: RobotAdminProps) {
                 subStyle={subStyle}
               />
               <div style={s('display:flex;flex-direction:column;gap:14px')}>
-                <CallControl dev={dev} />
+                {!api.DEMO_MODE && <CallControl dev={dev} />}
                 <LiveCall
                   sessions={d.sessions}
                   toolCalls={d.toolCalls}
