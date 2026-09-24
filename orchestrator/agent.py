@@ -127,6 +127,8 @@ _BASE_PROMPT = (
     "for them to do. Call check_menu only if the guest asks about an item "
     "you cannot find below or wants to double-check stock.\n\n"
     "ONE TOOL PER REPLY: never call more than one tool in the same reply. "
+    "One tool per reply does NOT mean one item per call: put every item for "
+    "a room in a single dispatch_delivery. "
     "If the guest asks for two things, handle one, then the other in your "
     "very next reply -- never drop the second one. (Two results at once make "
     "you answer twice, and the second answer talks over the guest's next "

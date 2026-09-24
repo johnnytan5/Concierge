@@ -295,11 +295,15 @@ for _t in SESSION_TOOLS:
 # this whatever the prompt says, and then nothing happens until the guest
 # speaks again (37s of silence on a real call). The agent nudges once when
 # it sees one. Deliberately narrow: "let me know if..." must not match.
+_ACTIONS = (r"check|look|pass|send|put|get|find|arrange|request|flag|confirm|have|book|bring|"
+            r"carry|take|add|sort|organi[sz]e|handle|dispatch|order|set|make|note|escalate|"
+            r"forward|notify|tell|call|update|change|cancel|recall|ask|see|pull|grab|let(?!\s+you\b)")
 _ANNOUNCE = re.compile(
     r"\b(one moment|just a moment|give me a (sec|second|moment)|"
-    r"let me (check|look|pass|send|see|get|put|find|arrange|sort|request|note|flag|confirm)|"
-    r"i'?ll (check|look|pass|send|put|get|find|arrange|request|flag|confirm|have)|"
-    r"checking (on|that|now)|passing (that|this|it))\b", re.I)
+    rf"(let me|i'?ll|i will|i'?m going to|i am going to)\s+(just\s+|now\s+|quickly\s+)?({_ACTIONS})\b|"
+    r"checking (on|that|now)|passing (that|this|it)|"
+    r"(sending|booking|bringing|adding|dispatching|arranging) (that|this|it|those|them|the|your|up|now|over))",
+    re.I)
 
 
 def announces_action(text: str) -> bool:
@@ -366,8 +370,27 @@ class ToolHandlers:
         if not dispatched:
             return {"task_id": None, "dispatched_items": [], "unavailable_items": unavailable}
 
-        task_id = uuid.uuid4().hex[:8]
         item_names = [i["name"] for i in dispatched]
+
+        # The room already has an order waiting at the counter? Add to it:
+        # one bin, one "Bin loaded", one trip. A second task would go to the
+        # other robot -- the one with no viewer window -- and in a dry run the
+        # model split "towel, shampoo, conditioner" into two dispatches.
+        live = self._newest_for_room(room)
+        if live and live["phase"] in ("QUEUED", "COLLECTING"):
+            self._q.put({"cmd": "amend", "task_id": live["task_id"], "add": item_names,
+                         "remove": [], "new_room": None})
+            inventory.decrement_stock(item_names, task_id=live["task_id"])
+            everything = list(live.get("items", [])) + item_names
+            return {"task_id": live["task_id"], "eta_seconds": eta_seconds_for(room),
+                    "dispatched_items": dispatched, "unavailable_items": unavailable,
+                    "joined_existing_order": True, "trip_items": everything,
+                    "status": "waiting at the front desk to be loaded",
+                    "tell_guest": "Added to the order already waiting at the front desk -- it all "
+                                  "goes up in one trip once staff load it: " + ", ".join(everything)
+                                  + ". Do not say it is already on the way."}
+
+        task_id = uuid.uuid4().hex[:8]
         self._q.put({"cmd": "dispatch", "task_id": task_id, "room": room,
                      "items": item_names, "priority": priority})
 
@@ -408,14 +431,19 @@ class ToolHandlers:
         if live and live["phase"] in ("QUEUED", "COLLECTING"):
             self._q.put({"cmd": "amend", "task_id": live["task_id"], "add": [label],
                          "remove": [], "new_room": None})
-            already = ", ".join(i for i in live.get("items", []) if i != label) or "their order"
+            others = [i for i in live.get("items", []) if i != label]
+            everything = others + [label]
+            listed = ", ".join(everything[:-1]) + " and " + everything[-1] if len(everything) > 1 else label
             return {"task_id": live["task_id"], "eta_seconds": eta_seconds_for(room),
                     "dispatched_items": [{"name": label}], "joined_existing_order": True,
+                    "trip_items": everything,
                     "waiting_for": "the rider to drop it at the front desk",
-                    "tell_guest": f"The {label} goes up together with the {already} in ONE trip: "
-                                  f"the robot is still at the front desk, and staff load both "
-                                  f"before it leaves. Say that -- not that anything is already "
-                                  f"on its way."}
+                    # Name EVERY item: "brings it up with your towel, shampoo and
+                    # conditioner" was heard as three things, not four.
+                    "tell_guest": f"Say, in these words or close: 'Your {listed} will all go up "
+                                  f"together in one trip, as soon as the rider drops the "
+                                  f"{label} at the front desk and staff load it.' Name every "
+                                  f"item; do not say anything is already on its way."}
         task_id = uuid.uuid4().hex[:8]
         self._q.put({"cmd": "dispatch", "task_id": task_id, "room": room,
                      "items": [label], "priority": "normal"})
@@ -696,6 +724,14 @@ if __name__ == "__main__":
                if n == "escalate_to_frontdesk"]
         assert esc[-1] == "Passed to the front desk from room 1204: aircon broken.", esc[-1]
 
+        # a second dispatch for a room whose order is still at the counter joins it
+        state["tasks"] = {"t8": {"task_id": "t8", "room": "1204", "phase": "COLLECTING",
+                                  "items": ["towel"], "dispatched_at": None}}
+        more = h.dispatch_delivery("1204", ["nasi lemak"])
+        assert more["task_id"] == "t8" and more["joined_existing_order"], more
+        assert q.items[-1]["cmd"] == "amend" and q.items[-1]["add"] == ["nasi lemak"], q.items[-1]
+        state["tasks"] = {}
+
         # quantities collapse the way the transcript reads them
         assert _qty(["towel", "towel", "nasi lemak"]) == "2× towel, 1× nasi lemak"
         assert _qty([]) == "nothing"
@@ -726,6 +762,13 @@ if __name__ == "__main__":
         assert announces_action("I'll check our checkout policy for you right away.")
         assert not announces_action("Let me know if you need anything else!")
         assert not announces_action("Your towel is on the way. Anything else?")
+        # the dry-run miss: a Chinese request answered with a promise, no tool
+        assert needs_nudge("I'll book a robot to carry your Uber Eats order up.")
+        assert needs_nudge("I will bring that up for you now.")
+        assert needs_nudge("I'll let the front desk know right away.")
+        assert not announces_action("I'll let you know when it arrives.")
+        assert not announces_action("Let me know if you need anything else.")
+        assert needs_nudge("Understood. First, sending the towel, shampoo, and conditioner.")
         assert needs_nudge("One moment, let me pass that to the front desk.")
         assert not needs_nudge("Let me check our policy. 3pm is $90. Want me to request it?")
         assert not needs_nudge("One moment, let me check. Your towel is on the way.")
@@ -743,6 +786,7 @@ if __name__ == "__main__":
                                   "items": ["towel"], "dispatched_at": None}}
         joined = h.deliver_parcel("0803", "Grab")
         assert joined["task_id"] == "t9" and joined["joined_existing_order"], joined
+        assert "towel and Grab food order will all go up together" in joined["tell_guest"], joined["tell_guest"]
         assert q.items[-1] == {"cmd": "amend", "task_id": "t9", "add": ["Grab food order"],
                                "remove": [], "new_room": None}, q.items[-1]
         state["tasks"]["t9"]["phase"] = "EN_ROUTE"   # already left: a new trip instead
