@@ -18,6 +18,7 @@ export const TOOL_HUMAN: Record<string, string> = {
   announce_arrival: 'Announced arrival',
   hotel_info: 'Hotel info',
   escalate_to_frontdesk: 'Escalated to desk',
+  end_call: 'Hung up',
 };
 
 /** Collapses the tools into the flow diagram's five tool nodes. */
