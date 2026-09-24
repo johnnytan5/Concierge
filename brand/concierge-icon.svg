@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Concierge robot logo">
+  <rect width="512" height="512" rx="112" fill="#201e1d"/>
+  <!-- shadow -->
+  <ellipse cx="256" cy="440" rx="110" ry="14" fill="#000" opacity=".35"/>
+  <!-- head: dome -->
+  <path d="M186 206 V150 a70 70 0 0 1 140 0 V206 Z" fill="#d9d6d5"/>
+  <path d="M206 150 a50 50 0 0 1 40 -48" stroke="#f3f2f2" stroke-width="10" stroke-linecap="round" fill="none" opacity=".8"/>
+  <!-- visor with eyes -->
+  <rect x="204" y="136" width="104" height="44" rx="22" fill="#201e1d"/>
+  <rect x="226" y="150" width="18" height="16" rx="8" fill="#8fd3ff"/>
+  <rect x="268" y="150" width="18" height="16" rx="8" fill="#8fd3ff"/>
+  <!-- collar -->
+  <rect x="172" y="200" width="168" height="16" rx="8" fill="#17467e"/>
+  <!-- cabinet frame -->
+  <rect x="160" y="212" width="192" height="196" rx="16" fill="#bcb8b7"/>
+  <!-- top door panel -->
+  <rect x="174" y="226" width="164" height="70" rx="10" fill="#1f5fa8"/>
+  <!-- the bin, open between the panels -->
+  <rect x="196" y="302" width="120" height="30" rx="8" fill="#ec3013"/>
+  <!-- bottom door panel -->
+  <rect x="174" y="338" width="164" height="56" rx="10" fill="#1f5fa8"/>
+  <!-- base + wheel -->
+  <rect x="150" y="400" width="212" height="22" rx="11" fill="#e7e4e3"/>
+  <circle cx="256" cy="426" r="18" fill="#201e1d"/>
+  <circle cx="256" cy="426" r="6" fill="#5b9e5f"/>
+</svg>
