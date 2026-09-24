@@ -300,11 +300,17 @@ def agent_definition(api_key: str, room: str | None = None) -> dict:
             # fragment ("Anything else?") and the real question was lost.
             # Longer silence costs ~0.5s per turn; being cut off costs the call.
             "turn_detection": {
-                "vad_threshold": 0.5,
+                # 0.6, not 0.5: family voices and chatter in the room kept
+                # registering as the guest.
+                "vad_threshold": 0.6,
                 "min_silence": 900,     # ms of silence when confident the turn ended
                 "max_silence": 2400,    # ms: end the turn regardless after this
                 "interrupt_response": True,
-                "interruption_delay": 100,
+                # ms of guest speech before the assistant stops talking. At
+                # 100 a cough, an "mm-hm" or someone else in the room cut a
+                # long reply off mid-sentence (dry run, 13:26:44). 500 still
+                # lets a real "wait, actually..." interrupt.
+                "interruption_delay": 500,
             },
         },
         "tools": SESSION_TOOLS,
