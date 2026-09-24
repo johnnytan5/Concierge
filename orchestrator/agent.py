@@ -72,7 +72,7 @@ import websockets
 from dotenv import load_dotenv
 
 from orchestrator import inventory
-from orchestrator.tools import SESSION_TOOLS, ToolHandlers, needs_nudge
+from orchestrator.tools import SESSION_TOOLS, ToolHandlers, needs_nudge, nudge_instruction
 from task_engine.engine import run as run_task_engine
 
 load_dotenv()
@@ -94,14 +94,14 @@ LLM_BASE_URL = "https://openrouter.ai/api/v1"
 # tool call (100-275 hidden tokens) and the guest hears dead air; with it,
 # first token ~1s and it says "let me check" on its own. Measured
 # 2026-09-23. /no_think and chat_template_kwargs do NOT work via OpenRouter.
-# The bare preset, NOT "qwen/qwen3.8-flash@preset/concierge": pinning the
-# model only borrows the preset's settings, so its fallback list never runs.
-# Measured 2026-09-24: Alibaba (qwen3.8-flash's only host) returned 429
-# "rate-limited upstream" from a shared pool, and a live escalation arrived
-# 87s late while AssemblyAI retried. With the bare preset, a 429 on Qwen
-# falls through to the next model in the preset (gpt-6-luna, then deepseek),
-# reasoning still off -- checked by blocking Alibaba on a test request.
-LLM_MODEL = "@preset/concierge"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
+# GPT-6 Luna, pinned, with the preset supplying its settings (reasoning off).
+# Measured 2026-09-24 on the turn that kept failing live (a Chinese Uber Eats
+# request mid-call): Luna called deliver_parcel 8/8 first time and 6/6 after
+# a nudge; qwen3.8-flash was 6-7/8 and, nudged, claimed "booked" without the
+# tool 5/6. Qwen's only host (Alibaba) was also returning 429 from a shared
+# upstream pool. Pinned rather than the bare "@preset/concierge" because the
+# preset's own model order did not take effect when reordered.
+LLM_MODEL = "openai/gpt-6-luna@preset/concierge"  # cheap (~$0.5/M completion tokens vs. Claude's), verified
                                     # live 2026-09-11: correct tool-calling on a multi-item
                                     # dispatch_delivery request, standalone against OpenRouter
 USE_BYO_LLM = True  # via OpenRouter (OPENROUTER_API_KEY in .env), not AssemblyAI's own
@@ -420,7 +420,9 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
         reply_texts: dict[str, list[str]] = {}
         replies_with_tool: set[str] = set()
         guest_speaking = False
-        nudged_this_turn = False
+        nudges_this_turn = 0     # capped at MAX_NUDGES per guest turn
+        last_guest_text = ""
+        parcel_booked = False    # deliver_parcel already called this call
         ending = False           # end_call was called; close after the goodbye
         force_close = None
         try:
@@ -463,6 +465,8 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
 
                 elif etype == "tool.call":
                     replies_with_tool.add(ev.get("reply_id") or current_reply)
+                    if ev.get("name") == "deliver_parcel":
+                        parcel_booked = True
                     print(f"tool.call: {ev.get('name')}({ev.get('arguments')})")  # debug
                     try:
                         result = handlers.dispatch(ev["name"], ev["arguments"])
@@ -507,26 +511,27 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
                     if ev.get("status") == "interrupted":
                         with play_lock:
                             play_buf.clear()  # barge-in: stop talking now
-                    elif (rid not in replies_with_tool and not nudged_this_turn
+                    elif (rid not in replies_with_tool and nudges_this_turn < MAX_NUDGES
                           and not guest_speaking and needs_nudge(said)):
                         # The model promised an action ("let me pass that on")
                         # and ended its turn without the tool call. Left alone
-                        # the guest waits until they speak again. One nudge per
-                        # guest turn so a stubborn model can't loop.
-                        nudged_this_turn = True
-                        print("nudge: reply announced an action without a tool call")
+                        # the guest waits until they speak again. Capped per
+                        # guest turn so a stubborn model can't loop; two, because
+                        # live the first nudged reply was once just another
+                        # promise ("I'll have that brought up for you now").
+                        nudges_this_turn += 1
+                        print(f"nudge {nudges_this_turn}: reply announced an action without a tool call")
                         await ws.send(json.dumps({
                             "type": "reply.create",
-                            "instructions": "You just told the guest you would do something "
-                                            "but did not call the tool. Call the right tool now. "
-                                            "Do not repeat what you already said.",
+                            "instructions": nudge_instruction(last_guest_text, parcel_booked),
                         }))
 
                 elif etype in ("transcript.user", "transcript.agent"):
                     role = "guest" if etype == "transcript.user" else "agent"
                     text = ev.get("text", "")
                     if role == "guest":
-                        nudged_this_turn = False
+                        nudges_this_turn = 0
+                        last_guest_text = text
                     print(f"{role}: {text}")
                     # Empty transcripts do arrive (partials, barge-in); a
                     # blank row would just be noise in the Call log, and the
@@ -553,6 +558,9 @@ async def _close_after(ws, seconds: float):
     print("CALL_ENDED by end_call (no goodbye reply arrived)")
     await ws.close()
 
+
+# reply.create nudges allowed per guest turn (see _run_session).
+MAX_NUDGES = 2
 
 # Terminal task phases — a delivery in any other phase is still on the floor.
 _DONE_PHASES = ("DONE", "AT_DESK")

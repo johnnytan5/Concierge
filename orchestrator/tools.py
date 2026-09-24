@@ -326,6 +326,23 @@ def needs_nudge(reply_text: str) -> bool:
     return announces_action(last)
 
 
+_DELIVERY_APP = re.compile(r"uber\s*eats|doordash|grab|foodpanda|meituan|deliveroo|外卖|美团|饿了么", re.I)
+
+
+def nudge_instruction(guest_text: str, parcel_booked: bool) -> str:
+    """What the reply.create nudge tells the model. Generic "call the right
+    tool" failed live: the nudged reply was another promise ("I'll have
+    that brought up for you now"). When the guest named a delivery app and
+    nothing is booked yet, name the tool outright."""
+    if _DELIVERY_APP.search(guest_text or "") and not parcel_booked:
+        return ("The guest's delivery-app order is NOT booked yet -- you did not call "
+                "deliver_parcel. Call deliver_parcel for their room right now. Do not say "
+                "anything before the tool call.")
+    return ("You told the guest you would do something but did not call the tool. Call "
+            "the right tool right now. Do not say anything before the tool call, and do "
+            "not repeat yourself.")
+
+
 class ToolHandlers:
     """Bound to one task_engine cmd_queue + shared state dict for the life
     of a voice session.
@@ -787,6 +804,9 @@ if __name__ == "__main__":
         assert not announces_action("I'll let you know when it arrives.")
         assert not announces_action("Let me know if you need anything else.")
         assert needs_nudge("Understood. First, sending the towel, shampoo, and conditioner.")
+        assert "deliver_parcel" in nudge_instruction("呃，老公跟他们说一下，我叫的Uber Eats已经到了", False)
+        assert "deliver_parcel" not in nudge_instruction("我叫的Uber Eats已经到了", True)
+        assert "deliver_parcel" not in nudge_instruction("Can I get a late checkout?", False)
         assert needs_nudge("One moment, let me pass that to the front desk.")
         assert not needs_nudge("Let me check our policy. 3pm is $90. Want me to request it?")
         assert not needs_nudge("One moment, let me check. Your towel is on the way.")
