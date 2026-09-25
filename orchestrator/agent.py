@@ -77,6 +77,15 @@ from task_engine.engine import run as run_task_engine
 
 load_dotenv()
 
+_print = print
+
+
+def print(*args, **kwargs):
+    """Every call-log line timestamped (HH:MM:SS.mmm). The log is the only
+    record of where a slow or silent reply lost its time -- transcripts in
+    Supabase only land once a reply is over."""
+    _print(time.strftime("%H:%M:%S.") + f"{time.time() % 1:.3f}"[2:], *args, **kwargs)
+
 WS_URL = "wss://agents.assemblyai.com/v1/ws"
 AGENTS_URL = "https://agents.assemblyai.com/v1/agents"
 SAMPLE_RATE = 24_000
@@ -118,18 +127,25 @@ _BASE_PROMPT = (
     "exact English item names from the MENU (e.g. 毛巾 -> towel).\n\n"
     "HOW TO SPEAK: keep every reply to one or two short sentences. Never "
     "read out the menu or a list longer than two items. Only talk about "
-    "items the guest actually asked for. Before calling any tool, say one "
-    "brief phrase first, such as 'One moment, let me check that.' That "
-    "phrase and the tool call MUST be in the same reply: never announce an "
-    "action ('let me pass that on', 'let me check') and end your turn "
-    "without actually calling the tool — the guest would wait in silence "
-    "until they speak again.\n\n"
+    "items the guest actually asked for.\n\n"
+    "TOOLS ARE INSTANT: when you need a tool, call it straight away and say "
+    "NOTHING before it -- no 'one moment', no 'let me check'. The result "
+    "comes back immediately and your spoken answer follows on its own. "
+    "(Text spoken before a tool call gets cut off mid-sentence together with "
+    "the answer after it, and the guest hears silence.) Never announce an "
+    "action ('let me pass that on') without calling the tool in that same "
+    "reply.\n\n"
     "ITEM REQUESTS: the MENU below is what the delivery robot can bring "
     "right now. Before you agree to send anything, check every requested "
     "item against it. Never say you will send an item that is not on it, "
     "and never confirm an order before you know each item is available. "
     "If an item is not on the MENU, say plainly that the hotel does not "
-    "have it and offer at most two close alternatives from the MENU. Do "
+    "have it and offer at most two close alternatives from the MENU. "
+    "An alternative is only an OFFER: never put it in dispatch_delivery "
+    "until the guest says yes to it. If they asked for towels and a "
+    "toothbrush, send the towels now and ask about the substitute; once "
+    "they agree, send only the substitute -- never an item that is already "
+    "on its way. Do "
     "NOT escalate an unavailable item to the front desk — there is nothing "
     "for them to do. Call check_menu only if the guest asks about an item "
     "you cannot find below or wants to double-check stock.\n\n"
@@ -448,6 +464,8 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
 
                 elif etype == "reply.audio":
                     raw_bytes = base64.b64decode(ev["data"])
+                    if audio_chunk_count == 0:
+                        print("reply first audio")  # time-to-first-sound, per reply
                     audio_chunk_count += 1  # debug: was completely invisible before
                     audio_byte_total += len(raw_bytes)
                     samples = np.frombuffer(raw_bytes, dtype="int16")
@@ -459,6 +477,7 @@ async def _run_session(ws, handlers: ToolHandlers, first_event: dict, session_id
 
                 elif etype == "reply.started":
                     current_reply = ev.get("reply_id")
+                    print(f"reply.started {current_reply}")
 
                 elif etype == "transcript.agent.delta":
                     reply_texts.setdefault(ev.get("reply_id") or current_reply, []).append(ev.get("delta", ""))
