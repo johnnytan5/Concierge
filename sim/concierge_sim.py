@@ -4,7 +4,7 @@ concierge_sim: control wrapper for delivery_bot_v2.xml.
 Built on MuJoCo's own model/car/car.xml skeleton (two zaxis-aligned side
 wheels + one frictionless rear support point, driven through a coupled
 forward/turn tendon) — verified stable under straight driving, turning,
-combined arcs, and door operation mid-drive. See ARCHITECTURE.md for the
+combined arcs, and door operation mid-drive. See the git history for the
 full verification history.
 
 Door mechanism: two independent slide-jointed panels (top slides up,
@@ -28,8 +28,8 @@ Usage:
     print(status.base.xy, status.door.fraction_open)
 
 Every method returns immediately — none block waiting for the robot to
-arrive anywhere or the door to finish moving. That matches CLAUDE.md
-constraint 2: the task engine (Process 2), which owns this simulator,
+arrive anywhere or the door to finish moving. That is the project's
+<100ms rule: the task engine (Process 2), which owns this simulator,
 must never let the orchestrator's tool handlers (Process 1) block on
 physical motion.
 """
@@ -51,7 +51,7 @@ import mujoco.viewer as mj_viewer
 # down runs into the drive wheel's housing, so its usable travel is much
 # smaller (0.04m) before it would collide. Both were tuned by checking
 # actual contact state in MuJoCo, not assumed — see delivery_bot_v2.xml
-# comments and ARCHITECTURE.md for the verification history.
+# comments and the git history for how it was verified.
 #
 # Measured 2026-09-07: lid_bottom_slide closes against gravity and was
 # settling ~0.0123m short of qpos=0 (a position actuator's steady-state

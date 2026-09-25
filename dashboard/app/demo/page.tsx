@@ -13,7 +13,7 @@ import type { DeliveryRow, RobotRow } from '../../lib/types';
 /**
  * The hosted demo: the full admin UI on the left, the real MuJoCo robot on
  * the right, and the phone call in this browser. No backend of our own --
- * see docs/WEB-DEMO-PLAN.md. The shared tabs (deliveries, call log,
+ * everything long-running happens in this tab. The shared tabs (deliveries, call log,
  * escalations, inventory) read the same Supabase as the local stack; the
  * robot and the live call are this visitor's own.
  */

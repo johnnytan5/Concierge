@@ -1,6 +1,6 @@
 """Process 1 — asyncio orchestrator. Holds the AssemblyAI Voice Agent
 WebSocket and the client-side tool handlers. Never touches MuJoCo or
-task_engine's tick loop directly (CLAUDE.md constraint 1) — task_engine
+task_engine's tick loop directly (physics never runs on the voice loop) — task_engine
 runs as its own process, talked to only via cmd_queue + the shared
 `state` dict (see task_engine/engine.py).
 
@@ -246,7 +246,7 @@ def system_prompt_for(room: str | None) -> str:
         f"to go to a different room."
     )
 
-# Room numbers / dish names pulled straight from PLAN.md's scenarios (S1-S3) —
+# Room numbers / dish names from the demo scenarios —
 # RQ2 is literally about how much this list helps WER on code-switched audio.
 KEYTERMS = ["1204", "0803", "towel", "conditioner", "toothbrush", "char kuey teow",
             # delivery apps a US guest will name (deliver_parcel); two words
@@ -627,7 +627,7 @@ async def start_inventory():
     script did, by hand, which is why the live e2e check passed anyway.)
 
     The blocking refresh goes through run_in_executor, never straight onto
-    the event loop (CLAUDE.md constraint 2). Returns the refresh task so
+    the event loop (tool handlers must stay under ~100 ms). Returns the refresh task so
     the caller can cancel it — and so it isn't garbage-collected mid-run."""
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, inventory.refresh_cache_sync)
@@ -701,7 +701,7 @@ def main(room: str | None = None, viewer: bool = False):
         # MuJoCo's viewer needs the Cocoa main thread on macOS, which only
         # mjpython provides. The engine's main thread is its own, so spawning
         # just that process under mjpython is enough; this one (the asyncio
-        # WS loop) stays plain python and never touches MuJoCo (constraint 1).
+        # WS loop) stays plain python and never touches MuJoCo.
         mjpython = os.path.join(os.path.dirname(sys.executable), "mjpython")
         if sys.platform == "darwin" and os.path.exists(mjpython):
             mp.set_executable(mjpython)

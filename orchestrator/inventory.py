@@ -2,7 +2,7 @@
 
 Tool handlers in orchestrator/tools.py read via lookup_items()/
 all_items() — instant, local, no network — and never await a Supabase
-call before returning tool.result (CLAUDE.md constraint 2). The cache is
+call before returning tool.result (handlers stay under ~100 ms). The cache is
 refreshed periodically by start_refresh_loop() (call once as an asyncio
 task alongside the main WS loop); writes go out via run_in_executor so a
 slow Supabase response can never block the event loop.
@@ -185,7 +185,7 @@ def end_voice_session(session_id: str):
 
 def insert_transcript_turn(session_id: str, role: str, text: str):
     """One row per transcript.user / transcript.agent event. Fire-and-forget
-    like every other write here -- CLAUDE.md constraint 2 covers the whole
+    like every other write here -- the ~100 ms rule covers the whole
     event loop, not just tool handlers, and a transcript row is never on
     any critical path."""
     def _do():

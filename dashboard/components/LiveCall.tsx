@@ -15,8 +15,8 @@ import type {
 /**
  * The front-desk line, as it happens.
  *
- * Deliberately NOT a mock phone UI. There is no telephony here and PLAN.md
- * §9 cut the phone number on purpose — this is a local mic session framed as
+ * Deliberately NOT a mock phone UI. There is no telephony here, and the phone
+ * number was cut on purpose — this is a local mic session framed as
  * the front-desk line. A dialpad would advertise a capability that does not
  * exist, which is worse than showing what is really going on.
  *

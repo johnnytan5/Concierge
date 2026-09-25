@@ -1,8 +1,8 @@
 """Process 1 tool schema + handlers — client-side function tools per
-CLAUDE.md's tool table (plus check_menu and escalate_to_frontdesk). Every
+the README's tool table. Every
 handler either puts one command on task_engine's cmd_queue or reads its
 shared `state` dict, and returns immediately — never waits on the robot
-(CLAUDE.md constraint 2).
+(every handler stays under ~100 ms).
 """
 import inspect
 import re
@@ -284,7 +284,7 @@ SESSION_TOOLS = [
 # filler line and only accepts tool.result after that reply is done. With
 # BYO-LLM the filler came back as 5-9s of silence, so every tool call cost
 # that much dead air plus a follow-up that often never came. Every handler
-# here returns in <100ms (CLAUDE.md constraint 2), so there is nothing to
+# here returns in <100ms, so there is nothing to
 # fill: hold takes the result immediately and auto-fires the reply.
 for _t in SESSION_TOOLS:
     _t["execution_mode"] = "hold"

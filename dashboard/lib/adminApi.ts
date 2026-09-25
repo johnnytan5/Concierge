@@ -16,8 +16,7 @@ const BASE =
  * The hosted web demo (Vercel) has no admin_api: that is a Python process on
  * the operator's laptop. With NEXT_PUBLIC_DEMO_MODE=1 the laptop-only controls
  * are hidden and any write explains itself instead of failing to reach
- * localhost. (Web calls and the in-browser robot replace these later — see
- * docs/WEB-DEMO-PLAN.md.)
+ * localhost. (On /demo, web calls and the in-browser robot replace these.)
  */
 export const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE === '1';
 

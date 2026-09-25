@@ -1,21 +1,20 @@
-"""Process 2 — task FSM + navigation, per ARCHITECTURE.md.
+"""Process 2 — task FSM + navigation.
 
 Runs in its own process, owning TWO DeliveryBotSimulator instances (one
 per robot) — never touched from the orchestrator (Process 1), per
-CLAUDE.md constraint 1. `cmd_queue` carries voice-triggered commands
+physics never runs on the voice loop. `cmd_queue` carries voice-triggered commands
 from the orchestrator (dispatch/amend/recall/announce) on the existing
 direct path; human-confirmation events (complete_loading/
 complete_collection, from a robot's own screen) arrive separately via
 Supabase polling (see Task 6b / supabase_sync.py) since they originate
 from a different process. `state` is a multiprocessing.Manager() dict
 the orchestrator reads directly for check_delivery_status/
-get_fleet_state — no round trip through the queue for reads (CLAUDE.md
-constraint 2).
+get_fleet_state — no round trip through the queue for reads
+(tool handlers stay under ~100 ms).
 
 Real corridor navigation: "desk to room" is a hand-authored waypoint path
 per room (task_engine/waypoints.json), followed via pure pursuit
-(task_engine/nav.py) -- see docs/superpowers/specs/2026-09-11-hotel-
-corridor-scene-nav-design.md for the full design. The phase/state contract
+(task_engine/nav.py). The phase/state contract
 below is unchanged from the straight-line-distance version it replaced.
 """
 import math
@@ -318,8 +317,7 @@ def _rotate_toward(sim, target_yaw: float, steer_gain: float = 2.0) -> bool:
 
 def _settle_heading(sim, task, steer_gain: float = 2.0):
     """Real bug this exists to fix (found live, reproducibly, tracing a
-    robot's exact position tick-by-tick -- see the ledger and
-    HANDOFF-2026-09-13.md): `pure_pursuit_step`'s arrival check only ever
+    robot's exact position tick-by-tick): `pure_pursuit_step`'s arrival check only ever
     constrained POSITION (`hypot(...) <= arrival_tolerance_m`), never
     heading. A robot driving home along a path that approaches the desk
     from +x (every room's reversed path does) ends up parked facing

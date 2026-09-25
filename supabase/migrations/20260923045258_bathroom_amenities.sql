@@ -2,7 +2,7 @@
 -- tell a guest "we don't carry shampoo" and then escalate it to the desk,
 -- which is the wrong answer twice over.
 --
--- toothbrush stays available=false on purpose: DEMO-RUNSHEET's failure beat
+-- toothbrush stays available=false on purpose: the demo's failure beat
 -- uses it, and "dental kit" is now the alternative the assistant can offer.
 
 insert into inventory_items (name, category, price, dietary_tags, available, stock_count) values

@@ -1,8 +1,7 @@
 """Waypoint navigation for Process 2 -- pure pursuit over a hand-authored
 per-room path (task_engine/waypoints.json). No graph, no pathfinding: the
-JSON file *is* the route. See docs/superpowers/specs/2026-09-11-hotel-
-corridor-scene-nav-design.md's Non-goals for why (topology is small and
-fixed; a search algorithm buys nothing here).
+JSON file *is* the route: the topology is small and fixed, so a search
+algorithm buys nothing here.
 
 Pure pursuit here means "follow this known point sequence" -- the robot's
 pose comes straight from MuJoCo's own simulated state (sim.pull_status()),

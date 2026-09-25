@@ -80,7 +80,7 @@ CALLS = [
         ],
     },
     {
-        # PLAN.md's S3 — Manglish with mid-utterance code switching, and the
+        # The code-switching scenario — Manglish with mid-utterance code switching, and the
         # exact dish agent.py biases for in KEYTERMS.
         "id": SESSION_PREFIX + "ckt0803",
         "minutes_ago": 41,

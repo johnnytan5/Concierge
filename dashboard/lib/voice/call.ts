@@ -4,7 +4,7 @@
  * the announced-but-never-called nudge, end_call, barge-in).
  *
  * Runs on the main thread next to the page; the robot's physics stays in
- * the sim worker (CLAUDE.md constraint 1) and tools only post commands to it.
+ * the sim worker (physics never shares the voice thread) and tools only post commands to it.
  * Secrets stay on the server: /api/call/start hands back a one-time token
  * whose session AssemblyAI ends at `seconds` (the 3-minute cap), and every
  * audit write goes through /api/call/event.

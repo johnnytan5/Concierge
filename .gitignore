@@ -2,14 +2,17 @@
 *.env
 __pycache__/
 *.pyc
-audio_tests/recordings/*
-!audio_tests/recordings/.gitkeep
 demo/*.mp4
 demo/*.mov
 .venv/
 .worktrees/
-.superpowers/
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
-.claude/worktrees/
 .DS_Store
+
+# AI coding-assistant files (kept locally, not part of the project)
+CLAUDE.md
+AGENTS.md
+.agents/
+.claude/
+skills-lock.json
+.mcp.json
+temp.md

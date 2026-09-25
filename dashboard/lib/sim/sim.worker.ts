@@ -3,7 +3,7 @@
  * The robot, in the browser: the official MuJoCo WASM build running our own
  * sim/scene_corridor.xml (copied to public/sim by scripts/sync-sim-assets.mjs)
  * plus the task engine (engine.ts, a port of task_engine/engine.py). A Web
- * Worker on purpose -- CLAUDE.md constraint 1: physics never runs on the
+ * Worker on purpose -- the project's first rule: physics never runs on the
  * thread that holds the voice connection.
  *
  * Protocol

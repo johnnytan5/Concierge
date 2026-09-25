@@ -1,6 +1,6 @@
 """Supabase read/write glue for Process 2 (task_engine). Called from
 task_engine's own tick loop, not from orchestrator's tool handlers —
-CLAUDE.md constraint 2 (<100ms) applies to tool handlers, not here, so
+The <100ms tool-handler rule applies to tool handlers, not here, so
 plain synchronous Supabase calls are fine in this module.
 """
 import os

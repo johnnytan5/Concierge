@@ -1,8 +1,8 @@
 /**
  * The voice agent's client-side tools, in the browser: a port of
  * orchestrator/tools.py (handlers, result summaries, the nudge heuristics).
- * Keep the two in step. Every handler returns immediately (CLAUDE.md
- * constraint 2): it posts a command to the sim worker and reads the last
+ * Keep the two in step. Every handler returns immediately (under
+ * ~100 ms): it posts a command to the sim worker and reads the last
  * engine state it reported; it never waits on the robot.
  *
  * Differences from the Python stack: one robot (the browser runs one sim).
