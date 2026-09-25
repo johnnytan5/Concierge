@@ -262,3 +262,14 @@ body{margin:0;background:var(--color-bg)}
 a{color:var(--color-accent)}
 a:hover{color:var(--color-accent-700)}
 *{box-sizing:border-box}
+
+/* — hosted web demo (/demo): admin UI left, MuJoCo right — */
+.demo-split { display: flex; height: 100vh; overflow: hidden; background: var(--color-bg); }
+/* z-index: the admin dialogs are position:fixed and must cover the sim pane too */
+.demo-admin { flex: 1 1 50%; min-width: 0; overflow-y: auto; position: relative; z-index: 2; }
+.demo-sim { flex: 1 1 50%; min-width: 0; position: relative; background: #15191f; border-left: 2px solid var(--color-text); }
+@media (max-width: 900px) {
+  .demo-split { flex-direction: column; height: auto; overflow: visible; }
+  .demo-admin { overflow: visible; }
+  .demo-sim { height: 70vh; flex: none; border-left: 0; border-top: 2px solid var(--color-text); }
+}

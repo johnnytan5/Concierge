@@ -17,7 +17,7 @@ import * as api from '../lib/adminApi';
 import CallModal from './CallModal';
 import CallControl from './CallControl';
 import LiveCall from './LiveCall';
-import type { ToolCallRow, TranscriptRow, SessionRow } from '../lib/types';
+import type { ToolCallRow, TranscriptRow, SessionRow, RobotRow, DeliveryRow } from '../lib/types';
 
 export type RobotAdminProps = {
   /** Dev view exposes table names, ids and endpoints. Staff view hides them. */
@@ -29,6 +29,23 @@ export type RobotAdminProps = {
   /** Tab to open on. Set to 'live' when recording the demo, so the first
    *  frame is the call rather than the fleet. */
   initialTab?: Tab;
+  /** The hosted web demo (/demo): the robot and the call live in this
+   *  browser, not behind admin_api. Everything else stays shared Supabase. */
+  web?: WebDemo;
+};
+
+export type WebDemo = {
+  /** This browser's robot, in place of public.robots. */
+  robots: RobotRow[];
+  /** Its tasks, straight from the engine: the fleet card shows the order
+   *  before its deliveries row has round-tripped through Supabase. */
+  tasks: DeliveryRow[];
+  /** Replaces CallControl (which launches the Python agent via admin_api). */
+  callPanel: (dev: boolean) => React.ReactNode;
+  /** The caller's own session: Live call follows it, never a stranger's. */
+  sessionId: string | null;
+  confirm: (robotId: string) => void;
+  recall: (robotId: string, reason: string) => void;
 };
 
 type Tab = 'live' | 'fleet' | 'deliveries' | 'calls' | 'escalations' | 'inventory';
@@ -59,6 +76,9 @@ export default function RobotAdmin(props: RobotAdminProps) {
   } = props;
 
   const d = useAdminData();
+  const web = props.web;
+  const robots = web ? web.robots : d.robots;
+  const liveSessions = web ? d.sessions.filter((x) => x.id === web.sessionId) : d.sessions;
 
   const [tab, setTab] = useState<Tab>(initialTab);
   const [delFilter, setDelFilter] = useState('All');
@@ -110,8 +130,9 @@ export default function RobotAdmin(props: RobotAdminProps) {
   const runOpen = run;
 
   // ---------------------------------------------------------------- fleet
-  const robotVMs = d.robots.map((r) => {
-    const task = d.deliveries.find((x) => x.task_id === r.current_task_id) ?? null;
+  const robotVMs = robots.map((r) => {
+    const task = d.deliveries.find((x) => x.task_id === r.current_task_id)
+      ?? web?.tasks.find((x) => x.task_id === r.current_task_id) ?? null;
     const step = phaseStep(r.phase);
     const moving = step >= 0;
     const frac = Math.max(0, Math.min(1, Number(r.pose_frac ?? 0)));
@@ -186,20 +207,22 @@ export default function RobotAdmin(props: RobotAdminProps) {
       // leave the desk until a human says the bin is loaded, and ARRIVED will
       // not release the robot until the guest says they took it.
       kioskAction: r.phase === 'COLLECTING'
-        ? { label: dev ? 'complete_loading' : 'Bin loaded — send it', fn: () => api.completeLoading(r.id) }
+        ? { label: dev ? 'complete_loading' : 'Bin loaded — send it',
+            fn: web ? async () => web.confirm(r.id) : () => api.completeLoading(r.id) }
         : r.phase === 'ARRIVED'
-          ? { label: dev ? 'complete_collection' : 'Guest collected it', fn: () => api.completeCollection(r.id) }
+          ? { label: dev ? 'complete_collection' : 'Guest collected it',
+              fn: web ? async () => web.confirm(r.id) : () => api.completeCollection(r.id) }
           : null,
     };
   });
 
-  const movingCount = d.robots.filter((r) => phaseStep(r.phase) >= 0).length;
+  const movingCount = robots.filter((r) => phaseStep(r.phase) >= 0).length;
   const inFlight = d.deliveries.filter((x) => !isTerminal(x.phase) && x.phase !== 'QUEUED');
   const queued = d.deliveries.filter((x) => x.phase === 'QUEUED');
   const openEsc = d.escalations.filter((e) => e.status === 'open');
 
   const statDefs: Array<{ label: string; value: string; alert?: boolean }> = [
-    { label: dev ? 'robots moving' : 'Robots moving', value: movingCount + ' / ' + (d.robots.length || 0) },
+    { label: dev ? 'robots moving' : 'Robots moving', value: movingCount + ' / ' + (robots.length || 0) },
     { label: dev ? 'in flight' : 'In flight', value: String(inFlight.length) },
     { label: dev ? 'queued' : 'Queued', value: String(queued.length) },
     { label: dev ? 'open escalations' : 'Needs attention', value: String(openEsc.length), alert: openEsc.length > 0 },
@@ -356,11 +379,11 @@ export default function RobotAdmin(props: RobotAdminProps) {
   // Badge on the Live tab: the point is "is someone on the line right now",
   // so it shows live/— rather than a count of anything.
   const liveSession = pickLiveSession(
-    d.sessions, lastActivityBySession(d.transcripts, d.toolCalls), d.now);
+    liveSessions, lastActivityBySession(d.transcripts, d.toolCalls), d.now);
 
   const tabDefs: Array<[Tab, string, string]> = [
     ['live', 'Live call', liveSession ? 'on' : '—'],
-    ['fleet', 'Fleet', movingCount + '/' + (d.robots.length || 0)],
+    ['fleet', 'Fleet', movingCount + '/' + (robots.length || 0)],
     ['deliveries', 'Deliveries', String(d.deliveries.length)],
     ['calls', 'Call log', String(callGroups.length)],
     ['escalations', 'Escalations', String(openEsc.length)],
@@ -406,8 +429,9 @@ export default function RobotAdmin(props: RobotAdminProps) {
 
   const confirmRecall = guarded(async () => {
     if (!draft?.id) return;
-    await api.recallRobot(
-      draft.id, draft.reason?.trim() || 'Recalled from the admin dashboard');
+    const reason = draft.reason?.trim() || 'Recalled from the admin dashboard';
+    if (web) web.recall(draft.id, reason);
+    else await api.recallRobot(draft.id, reason);
   });
 
   const conn = {
@@ -544,13 +568,13 @@ export default function RobotAdmin(props: RobotAdminProps) {
                 subStyle={subStyle}
               />
               <div style={s('display:flex;flex-direction:column;gap:14px')}>
-                {!api.DEMO_MODE && <CallControl dev={dev} />}
+                {web ? web.callPanel(dev) : !api.DEMO_MODE && <CallControl dev={dev} />}
                 <LiveCall
-                  sessions={d.sessions}
+                  sessions={liveSessions}
                   toolCalls={d.toolCalls}
                   transcripts={d.transcripts}
                   deliveries={d.deliveries}
-                  robots={d.robots}
+                  robots={robots}
                   dev={dev}
                   now={d.now}
                 />

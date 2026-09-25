@@ -1,86 +1,150 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import RobotAdmin from '../../components/RobotAdmin';
 import SimView, { type EngineState, type SimHandle } from '../../components/SimView';
+import WebCallPanel, { ROOMS } from '../../components/WebCallPanel';
 import { startCall, type Call, type CallStatus } from '../../lib/voice/call';
+import { s } from '../../lib/css';
+import { MONO, PRIMARY_BTN } from '../../lib/ui';
+import { humanPhase } from '../../lib/format';
+import type { DeliveryRow, RobotRow } from '../../lib/types';
 
 /**
- * Web demo: call the front desk from the browser and watch the real MuJoCo
- * robot deliver. The split-screen dashboard layout lands on Day 4
- * (docs/WEB-DEMO-PLAN.md); this is the working call + sim.
+ * The hosted demo: the full admin UI on the left, the real MuJoCo robot on
+ * the right, and the phone call in this browser. No backend of our own --
+ * see docs/WEB-DEMO-PLAN.md. The shared tabs (deliveries, call log,
+ * escalations, inventory) read the same Supabase as the local stack; the
+ * robot and the live call are this visitor's own.
  */
-const ROOMS = ['1204', '0803', '0804', '1205'];
+const CAMERA_LABEL: Record<string, string> = {
+  follow: 'Top view · following the robot',
+  desk_staff: 'Front desk · loading the bin',
+};
 
 export default function DemoPage() {
   const sim = useRef<SimHandle | null>(null);
   const state = useRef<EngineState | null>(null);
   const call = useRef<Call | null>(null);
-  const [ready, setReady] = useState(false);
+  const [simReady, setSimReady] = useState(false);
   const [st, setSt] = useState<EngineState | null>(null);
+  const [camera, setCamera] = useState('follow');
   const [room, setRoom] = useState(ROOMS[0]);
   const [status, setStatus] = useState<CallStatus | 'idle'>('idle');
   const [note, setNote] = useState('');
-  const [log, setLog] = useState<{ who: string; text: string }[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [left, setLeft] = useState(0);
-
-  const current = st?.robot.current_task ? st.tasks[st.robot.current_task] : null;
-  const inCall = status === 'connecting' || status === 'live';
 
   useEffect(() => {
     if (status !== 'live') return;
-    const id = setInterval(() => setLeft(Math.max(0, Math.round(((call.current?.endsAt ?? 0) - Date.now()) / 1000))), 500);
+    const tick = () => setLeft(Math.max(0, Math.round(((call.current?.endsAt ?? 0) - Date.now()) / 1000)));
+    const id = setInterval(tick, 500);
     return () => clearInterval(id);
   }, [status]);
 
-  const onState = (s: EngineState) => { state.current = s; call.current?.onEngineState(s); setSt(s); };
+  // Leaving the page mid-call: end the session rather than leave it billing.
+  useEffect(() => {
+    const bye = () => call.current?.hangup();
+    window.addEventListener('pagehide', bye);
+    return () => window.removeEventListener('pagehide', bye);
+  }, []);
+
+  const onState = (x: EngineState) => { state.current = x; call.current?.onEngineState(x); setSt(x); };
+
+  const task = st?.robot.current_task ? st.tasks[st.robot.current_task] : null;
+  // This browser's robot, in the shape of a public.robots row.
+  const robots: RobotRow[] = useMemo(() => st ? [{
+    id: st.robot.robot_id, phase: st.robot.phase, current_task_id: st.robot.current_task,
+    pose_frac: st.robot.pose_frac, battery: st.robot.battery, updated_at: new Date().toISOString(),
+  }] : [], [st]);
+  const tasks: DeliveryRow[] = useMemo(() => st ? Object.values(st.tasks).map((t) => ({
+    task_id: t.task_id, robot_id: st.robot.robot_id, room: t.room, items: t.items, phase: t.phase,
+    priority: t.priority, dispatched_at: null, arrived_at: null, created_at: '', updated_at: '',
+  })) : [], [st]);
 
   async function dial() {
     if (!sim.current) return;
-    setLog([]); setNote('');
+    setNote('');
     try {
       call.current = await startCall(room, {
         send: (cmd) => sim.current?.send(cmd),
         snapshot: () => state.current,
-        onStatus: (s, detail) => { setStatus(s); if (detail) setNote(detail); },
-        onTurn: (role, text) => setLog((l) => [...l, { who: role === 'guest' ? 'You' : 'Front desk', text }]),
-        onTool: (_name, summary) => setLog((l) => [...l, { who: '→', text: summary }]),
+        onStatus: (x, detail) => { setStatus(x); if (detail) setNote(detail); },
       });
+      setSessionId(call.current.sessionId);
+      setLeft(Math.round((call.current.endsAt - Date.now()) / 1000));
     } catch (e) {
       setStatus('error');
-      setNote(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setNote(/denied|NotAllowed|Permission/i.test(msg) ? 'Microphone access was blocked. Allow it in the address bar and try again.' : msg);
     }
   }
 
-  const btn = { padding: '10px 14px', border: '1px solid #444', background: '#2d2a29', color: '#f3f2f2', cursor: 'pointer', fontFamily: 'ui-monospace, Menlo, monospace' } as const;
-  const mono = { fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 13 } as const;
+  // The robot's kiosk, over the camera that shows the moment it is for.
+  const kiosk = task?.phase === 'COLLECTING' && task._load === 'open'
+    ? 'Bin loaded — send it'
+    : task?.phase === 'ARRIVED' && task._arr === 'cargo_open' ? 'Guest collected it' : null;
+  const camLabel = CAMERA_LABEL[camera] ?? (camera.startsWith('room_') ? `Room ${camera.slice(5)} · hand-over` : camera);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#201e1d', color: '#f3f2f2' }}>
-      <div style={{ display: 'flex', gap: 8, padding: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <b style={{ marginRight: 12 }}>Concierge</b>
-        <select value={room} disabled={inCall} onChange={(e) => setRoom(e.target.value)} style={btn} aria-label="Room">
-          {ROOMS.map((r) => <option key={r} value={r}>Room {r}</option>)}
-        </select>
-        {inCall
-          ? <button style={{ ...btn, background: '#7a2d2d' }} onClick={() => call.current?.hangup()}>Hang up{status === 'live' ? ` · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : '…'}</button>
-          : <button style={{ ...btn, background: '#2d5a3a' }} disabled={!ready} onClick={dial}>Call the front desk</button>}
-        <button style={btn} disabled={!ready} onClick={() => sim.current?.confirm()}>Bin loaded</button>
-        <span style={{ ...mono, marginLeft: 'auto', color: '#b8b4b3' }}>
-          {st ? `${st.robot.phase}${current ? ` · ${current.room} · ${current.items.join(', ')}` : ''}` : '…'}
-        </span>
+    <div className="demo-split">
+      <div className="demo-admin">
+        <RobotAdmin
+          devMode={false}
+          navLayout="sidebar"
+          fleetViz="steps"
+          showProposals
+          initialTab="live"
+          web={{
+            robots,
+            tasks,
+            sessionId,
+            confirm: () => sim.current?.confirm(),
+            recall: (_robotId, reason) => { if (task) sim.current?.send({ cmd: 'recall', task_id: task.task_id, reason }); },
+            callPanel: (dev) => (
+              <WebCallPanel
+                dev={dev} room={room} setRoom={setRoom} status={status} secondsLeft={left} note={note}
+                ready={simReady} robotBusy={!!task && status === 'ended'} onCall={dial} onHangUp={() => call.current?.hangup()}
+              />
+            ),
+          }}
+        />
       </div>
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        <div style={{ width: 340, overflowY: 'auto', padding: 12, borderRight: '1px solid #333', ...mono }}>
-          <div style={{ color: '#b8b4b3', marginBottom: 8 }}>{status === 'connecting' ? 'Connecting…' : status === 'live' ? 'On the line — speak normally.' : note || 'Pick a room and call.'}</div>
-          {log.map((l, i) => (
-            <div key={i} style={{ marginBottom: 8, color: l.who === '→' ? '#8fb3a0' : undefined }}>
-              <b>{l.who}</b> {l.text}
-            </div>
-          ))}
+      <div className="demo-sim">
+        <SimView
+          onReady={(h) => {
+            sim.current = h;
+            setSimReady(true);
+            // dev only: drive the robot from the console / automated checks
+            if (process.env.NODE_ENV !== 'production') (window as unknown as { __concierge: SimHandle }).__concierge = h;
+          }}
+          onState={onState}
+          onCamera={setCamera}
+          style={{ position: 'absolute', inset: 0, minHeight: 0 }}
+        />
+        <div style={s('position:absolute;top:12px;left:12px;display:flex;gap:6px;flex-wrap:wrap;pointer-events:none')}>
+          <span style={s('padding:5px 9px;background:rgba(32,30,29,.82);color:#f3f2f2;font-family:' + MONO + ';font-size:11px;letter-spacing:.04em')}>
+            MuJoCo · live in your browser
+          </span>
+          <span style={s('padding:5px 9px;background:rgba(32,30,29,.82);color:#f3f2f2;font-family:' + MONO + ';font-size:11px')}>
+            {camLabel}
+          </span>
+          {st && (
+            <span style={s('padding:5px 9px;font-family:' + MONO + ';font-size:11px;font-weight:600;' +
+              (task ? 'background:var(--color-accent);color:#fff' : 'background:rgba(32,30,29,.82);color:#f3f2f2'))}>
+              {task ? `${humanPhase(st.robot.phase)} · ${task.room}` : 'Waiting at the desk'}
+            </span>
+          )}
         </div>
-        <div style={{ flex: 1 }}>
-          <SimView onReady={(h) => { sim.current = h; setReady(true); }} onState={onState} />
-        </div>
+        {kiosk && (
+          <button
+            onClick={() => sim.current?.confirm()}
+            style={s(PRIMARY_BTN + ';position:absolute;bottom:18px;left:50%;transform:translateX(-50%);' +
+              'font-size:15px;padding:12px 22px;background:var(--color-accent);border-color:var(--color-accent);color:#fff')}
+          >
+            {kiosk}
+          </button>
+        )}
       </div>
     </div>
   );
