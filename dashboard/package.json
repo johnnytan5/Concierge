@@ -11,7 +11,8 @@
     "predev": "node scripts/sync-sim-assets.mjs",
     "prebuild": "node scripts/sync-sim-assets.mjs",
     "selfcheck:engine": "npm run sync-sim && node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/engine-selfcheck.mts",
-    "selfcheck:tools": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/node-ts-hooks.mjs scripts/tools-selfcheck.mts"
+    "selfcheck:tools": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/node-ts-hooks.mjs scripts/tools-selfcheck.mts",
+    "e2e:call": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/node-ts-hooks.mjs scripts/call-e2e.mts"
   },
   "dependencies": {
     "@mujoco/mujoco": "^3.14.0",
