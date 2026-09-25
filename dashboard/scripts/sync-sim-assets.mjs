@@ -16,6 +16,7 @@ const copy = (from, to) => {
 for (const f of ['scene_corridor.xml', 'delivery_bot_v2.xml']) {
   copy(join(root, '..', 'sim', f), join(root, 'public', 'sim', f));
 }
+copy(join(root, '..', 'task_engine', 'waypoints.json'), join(root, 'public', 'sim', 'waypoints.json'));
 for (const f of ['mujoco.js', 'mujoco.wasm']) {
   copy(join(root, 'node_modules', '@mujoco', 'mujoco', f), join(root, 'public', 'mujoco', f));
 }

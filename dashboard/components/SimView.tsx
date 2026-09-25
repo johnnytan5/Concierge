@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import type { Cmd, Engine } from '../lib/sim/engine';
 
 /**
  * The MuJoCo scene drawn with three.js. Physics runs in lib/sim/sim.worker.ts;
@@ -9,30 +10,35 @@ import * as THREE from 'three';
  * cylinders, spheres and a plane (no mesh files), so each geom maps to one
  * three.js primitive.
  *
- * MuJoCo is Z-up; the camera looks straight down with +x to the right, like
- * the "follow" view in the desktop viewer.
+ * MuJoCo is Z-up. "follow" looks straight down with +x to the right, like
+ * the desktop viewer; the engine cuts to the model's desk and room cameras
+ * during the loading scene and the hand-over.
  */
 
 export type SimHandle = {
-  drive: (v: number, omega: number) => void;
-  door: (open: boolean) => void;
+  send: (cmd: Cmd) => void;
+  confirm: () => void; // the kiosk button: Bin loaded / collected
 };
+export type EngineState = { time: number; robot: Engine['robot']; tasks: Engine['tasks'] };
 
 type Robot = { x: number; y: number; yawDeg: number };
+type CamPose = { name: string; pos?: number[]; mat?: number[]; fovy?: number };
 
 const FOLLOW_HEIGHT = 4.5;
 
-export default function SimView({ onReady, onRobot, style }: {
+export default function SimView({ onReady, onRobot, onState, onCamera, style }: {
   onReady?: (h: SimHandle) => void;
   onRobot?: (r: Robot) => void;
+  onState?: (s: EngineState) => void;
+  onCamera?: (name: string) => void; // 'follow', 'desk_staff', 'room_1204', ...
   style?: React.CSSProperties;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Latest callbacks for the long-lived worker handler, updated after render.
-  const cb = useRef({ onReady, onRobot });
-  useEffect(() => { cb.current = { onReady, onRobot }; });
+  const cb = useRef({ onReady, onRobot, onState, onCamera });
+  useEffect(() => { cb.current = { onReady, onRobot, onState, onCamera }; });
 
   useEffect(() => {
     const el = mount.current;
@@ -66,6 +72,7 @@ export default function SimView({ onReady, onRobot, style }: {
     const meshes: (THREE.Mesh | null)[] = [];
     const mat4 = new THREE.Matrix4();
     let robot: Robot = { x: 0, y: 0, yawDeg: 0 };
+    let cam: CamPose = { name: 'follow' };
 
     const worker = new Worker(new URL('../lib/sim/sim.worker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent) => {
@@ -84,6 +91,8 @@ export default function SimView({ onReady, onRobot, style }: {
           else if (type === 6) geo = new THREE.BoxGeometry(2 * s[0], 2 * s[1], 2 * s[2]);
           if (!geo) { meshes.push(null); continue; }
           const color = new THREE.Color(msg.rgba[i * 4], msg.rgba[i * 4 + 1], msg.rgba[i * 4 + 2]);
+          // past the floor's edge, show more floor rather than a void
+          if (type === 0) scene.background = color.clone().multiplyScalar(0.9);
           const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color, transparent: a < 1, opacity: a }));
           mesh.matrixAutoUpdate = false;
           scene.add(mesh);
@@ -91,8 +100,8 @@ export default function SimView({ onReady, onRobot, style }: {
         }
         setLoading(false);
         cb.current.onReady?.({
-          drive: (v, omega) => worker.postMessage({ type: 'drive', v, omega }),
-          door: (open) => worker.postMessage({ type: 'door', open }),
+          send: (cmd) => worker.postMessage({ type: 'cmd', cmd }),
+          confirm: () => worker.postMessage({ type: 'confirm' }),
         });
       } else if (msg.type === 'frame') {
         const { xpos, xmat } = msg;
@@ -107,14 +116,32 @@ export default function SimView({ onReady, onRobot, style }: {
           mesh.matrix.copy(mat4);
         }
         robot = msg.robot;
+        if (msg.camera.name !== cam.name) cb.current.onCamera?.(msg.camera.name);
+        cam = msg.camera;
         cb.current.onRobot?.(robot);
+      } else if (msg.type === 'state') {
+        cb.current.onState?.({ time: msg.time, robot: msg.robot, tasks: msg.tasks });
+      } else if (msg.type === 'cmdError') {
+        console.warn('[sim] command rejected:', msg.message);
       }
     };
 
     let raf = 0;
+    const camMat = new THREE.Matrix4(), scale = new THREE.Vector3();
     const draw = () => {
-      camera.position.set(robot.x, robot.y, FOLLOW_HEIGHT);
-      camera.lookAt(robot.x, robot.y, 0);
+      if (cam.pos && cam.mat) {
+        // MuJoCo cameras look down their -z with +y up, same as three.js
+        const r = cam.mat;
+        camMat.set(r[0], r[1], r[2], cam.pos[0], r[3], r[4], r[5], cam.pos[1], r[6], r[7], r[8], cam.pos[2], 0, 0, 0, 1);
+        camMat.decompose(camera.position, camera.quaternion, scale);
+        if (camera.fov !== cam.fovy) { camera.fov = cam.fovy ?? 45; camera.updateProjectionMatrix(); }
+      } else {
+        if (camera.fov !== 45) { camera.fov = 45; camera.updateProjectionMatrix(); }
+        camera.up.set(0, 1, 0);
+        // same corridor width in view whatever the pane's shape
+        camera.position.set(robot.x, robot.y, FOLLOW_HEIGHT * Math.max(1, 1.6 / camera.aspect));
+        camera.lookAt(robot.x, robot.y, 0);
+      }
       renderer.render(scene, camera);
       raf = requestAnimationFrame(draw);
     };

@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // copied MuJoCo WASM build (scripts/sync-sim-assets.mjs), not our code
+    "public/mujoco/**",
   ]),
 ]);
 
