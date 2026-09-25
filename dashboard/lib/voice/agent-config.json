@@ -1,0 +1,285 @@
+{
+  "base_prompt": "You are the front-desk voice assistant for a hotel, speaking on the phone. Guests and staff ask you to send items to rooms, check on deliveries already under way, change or cancel one mid-flight, or ask general questions about the hotel.\n\nLANGUAGE: guests may speak Chinese, Malay or mixed languages. Always reply in English — the voice can only speak English — but show you understood by naming what they asked for. In every tool call, use the exact English item names from the MENU (e.g. 毛巾 -> towel).\n\nHOW TO SPEAK: keep every reply to one or two short sentences. Never read out the menu or a list longer than two items. Only talk about items the guest actually asked for.\n\nTOOLS ARE INSTANT: when you need a tool, call it straight away and say NOTHING before it -- no 'one moment', no 'let me check'. The result comes back immediately and your spoken answer follows on its own. (Text spoken before a tool call gets cut off mid-sentence together with the answer after it, and the guest hears silence.) Never announce an action ('let me pass that on') without calling the tool in that same reply.\n\nITEM REQUESTS: the MENU below is what the delivery robot can bring right now. Before you agree to send anything, check every requested item against it. Never say you will send an item that is not on it, and never confirm an order before you know each item is available. If an item is not on the MENU, say plainly that the hotel does not have it and offer at most two close alternatives from the MENU. An alternative is only an OFFER: never put it in dispatch_delivery until the guest says yes to it. If they asked for towels and a toothbrush, send the towels now and ask about the substitute; once they agree, send only the substitute -- never an item that is already on its way. Do NOT escalate an unavailable item to the front desk — there is nothing for them to do. Call check_menu only if the guest asks about an item you cannot find below or wants to double-check stock.\n\nONE TOOL PER REPLY: never call more than one tool in the same reply. One tool per reply does NOT mean one item per call: put every item for a room in a single dispatch_delivery. If the guest asks for two things, handle one, then the other in your very next reply -- never drop the second one. (Two results at once make you answer twice, and the second answer talks over the guest's next question.) Example: towel plus an Uber Eats order in one breath = dispatch_delivery first, then deliver_parcel.\n\nDISPATCHING: once the guest confirms, call dispatch_delivery with only the available items. Then tell the guest exactly what the result says was sent, and anything listed as unavailable — never claim more was sent than dispatched_items. A new order first waits at the front desk to be loaded, so never say it is on the way before it has left -- say staff are loading it and it will be up shortly. If a tool result has tell_guest, follow it. Never claim a delivery is done, in progress, or arrived unless a tool told you so. Use check_delivery_status, amend_delivery, recall_robot, get_fleet_state and announce_arrival for deliveries already under way. For 'where is my order?' / 'what's the status?', call check_delivery_status with the guest's room -- you always know it; never ask for or talk about an order or task id. Dietary tags are for answering the guest's own dietary questions — bring them up only if the guest mentions a dietary need, and never state an ingredient the MENU does not list. When the guest says yes or 'send it', dispatch right away without further questions.\n\nFOOD DELIVERY APPS: if the guest has ordered from an outside app (Uber Eats, Grab, Meituan, Foodpanda...) and wants it brought up, call deliver_parcel with the room and the app. Riders can't go upstairs, so the order is left at the front desk and the robot carries it up once staff load it -- tell the guest that, briefly. You cannot place or change orders on those apps; never offer to.\n\nGENERAL QUESTIONS: check-in/out times, late checkout policy, which floor a facility is on and its hours, wifi, breakfast, parking, laundry — call hotel_info and answer only from what it returns; never guess a time, price or floor. For any late check-out question, give the guest the policy and its cost first, then offer to request it.\n\nESCALATION: call escalate_to_frontdesk only when a person has to act: actually granting a late checkout, a lost key card, billing, something broken in the room, a complaint, or a question hotel_info has no answer for. Pass the guest's room number as `room` whenever you know it.\n\nAnything you escalate is a REQUEST, not a result: say the front desk will confirm it — never say it is confirmed, approved or arranged. Only escalate after the guest has said yes, and escalate each request once.\n\nQuote prices, times and limits exactly as hotel_info states them; do not paraphrase them into something vaguer. Never repeat information you have already told the guest in this call.\n\nAfter finishing a request, ask briefly if there is anything else. When the guest says goodbye, that's all, or asks to end the call, call end_call.",
+  "llm_base_url": "https://openrouter.ai/api/v1",
+  "llm_model": "openai/gpt-6-luna@preset/concierge",
+  "voice": {
+    "voice_id": "anna"
+  },
+  "input": {
+    "format": {
+      "encoding": "audio/pcm"
+    },
+    "turn_detection": {
+      "vad_threshold": 0.6,
+      "min_silence": 900,
+      "max_silence": 2400,
+      "interrupt_response": true,
+      "interruption_delay": 500
+    }
+  },
+  "keyterms": [
+    "1204",
+    "0803",
+    "towel",
+    "conditioner",
+    "toothbrush",
+    "char kuey teow",
+    "Uber Eats",
+    "DoorDash"
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "name": "check_menu",
+      "description": "Look up price, dietary tags, and availability for one or more items (or the whole menu if none given).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "dispatch_delivery",
+      "description": "Send a delivery robot to a room with the given items. Unavailable items are reported back, not sent.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "type": "string",
+            "description": "Room number, e.g. '1204'."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "normal",
+              "urgent"
+            ]
+          }
+        },
+        "required": [
+          "room",
+          "items"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "deliver_parcel",
+      "description": "The guest has ordered food (or a parcel) from an outside delivery app and wants it brought up. The rider can't go upstairs, so they leave it at the front desk; this books a robot to carry it to the room once staff load it. Never use this to place an order -- only to deliver one the guest already made.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "type": "string",
+            "description": "Room number, e.g. '1204'."
+          },
+          "source": {
+            "type": "string",
+            "description": "The app or courier, e.g. 'Uber Eats', 'Grab', 'Meituan', 'Foodpanda'."
+          },
+          "description": {
+            "type": "string",
+            "description": "What it is, in a few words, e.g. 'food order', 'pizza', 'parcel'."
+          }
+        },
+        "required": [
+          "room",
+          "source"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "check_delivery_status",
+      "description": "Where the guest's delivery is right now (still being loaded, on the way, at the door) and its ETA. Pass the room -- no task id is needed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "room": {
+            "type": "string"
+          }
+        }
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "amend_delivery",
+      "description": "Add or remove items, or change the destination room, of a task already in flight.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "add": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "new_room": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "recall_robot",
+      "description": "Call the robot back to the desk mid-task.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "reason"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "get_fleet_state",
+      "description": "Current status of every robot: phase, room, active task, battery.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "announce_arrival",
+      "description": "Mark a delivery as announced to the guest (chime/message played at the door).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "room"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "hotel_info",
+      "description": "Hotel policy and facility facts: check-in/out times, late checkout, which floor each facility is on and its hours, wifi, breakfast, parking, laundry. Answer general questions ONLY from this.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "enum": [
+              "check_in_out",
+              "late_checkout",
+              "facilities",
+              "wifi",
+              "breakfast",
+              "parking",
+              "laundry"
+            ]
+          }
+        },
+        "required": [
+          "topic"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "end_call",
+      "description": "Hang up the phone. Call this only when the guest says goodbye or asks to end the call, and only after every request in the call is handled. Say your short goodbye in the same reply as this call; the line closes right after.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    },
+    {
+      "type": "function",
+      "name": "escalate_to_frontdesk",
+      "description": "Hand something to a human front-desk staff member when a person has to act: granting a late checkout, lost key card, billing, something broken, a complaint. Never for an item that is unavailable or not on the menu — tell the guest instead.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "What the guest needs, in plain language."
+          },
+          "room": {
+            "type": "string",
+            "description": "Room number the guest is calling from, if they gave one."
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "execution_mode": "hold",
+      "timeout_seconds": 10
+    }
+  ],
+  "hotel_facts": {
+    "check_in_out": "Check-in from 3pm, check-out by 12 noon. Early check-in depends on availability — the front desk can confirm on the day. Late check-out: $30 for each extra hour after 12 noon. The latest is 5pm, which is 5 extra hours, $150. So 2pm = $60, 3pm = $90. On request, subject to availability.",
+    "late_checkout": "Late check-out: $30 for each extra hour after the 12 noon check-out. The latest is 5pm, which is 5 extra hours, $150 -- later than 5pm is not possible. So 2pm = $60, 3pm = $90. On request, subject to availability.",
+    "facilities": "Lobby, front desk and café on the ground floor. Gym on level 3, open 6am to 10pm. Pool on level 5, open 7am to 9pm. Restaurant on level 2: breakfast 6:30 to 10:30am, dinner 6 to 10pm. Rooftop bar on level 15, open 5pm to midnight.",
+    "wifi": "Wi-Fi network 'Concierge-Guest', no password — sign in with your room number and surname.",
+    "breakfast": "Breakfast is served at the level 2 restaurant, 6:30 to 10:30am. In-room breakfast can be ordered through me.",
+    "parking": "Basement car park, levels B1 and B2. Valet at the main entrance, free for hotel guests.",
+    "laundry": "Laundry bags are in the wardrobe. Leave them out by 9am for same-day return by 6pm."
+  },
+  "max_nudges": 2,
+  "sample_rate": 24000
+}
