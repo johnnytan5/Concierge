@@ -1,4 +1,4 @@
-import { CALL_SECONDS, callToken, createAgent, db, loadMenu, webCallsToday } from '../../../../lib/voice/server';
+import { CALL_SECONDS, WS_URL, callToken, createAgent, db, loadMenu, webCallsToday } from '../../../../lib/voice/server';
 import { clientIp, refusal, type LimitRow } from '../../../../lib/voice/limits';
 
 /**
@@ -49,7 +49,7 @@ export async function POST(request: Request) {
     if (error) throw new Error(`session: ${error.message}`);
     const lim = await db().from('call_limits').insert({ session_id: sessionId, ip: who.ip, client_id: who.clientId, fingerprint: who.fingerprint });
     if (lim.error) throw new Error(`limits: ${lim.error.message}`);
-    return Response.json({ session_id: sessionId, agent_id: agentId, token, menu, seconds: CALL_SECONDS });
+    return Response.json({ session_id: sessionId, agent_id: agentId, token, ws_url: WS_URL, menu, seconds: CALL_SECONDS });
   } catch (e) {
     console.error('[call/start]', e);
     return Response.json({ error: 'Could not start the call. Please try again.' }, { status: 502 });

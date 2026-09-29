@@ -12,8 +12,14 @@ import { menuForPrompt, type MenuItem } from './menu';
  */
 
 export const CALL_SECONDS = 180;
-const AGENTS_URL = 'https://agents.assemblyai.com/v1/agents';
-const TOKEN_URL = 'https://agents.assemblyai.com/v1/token';
+// One explicit region for the agent, the token and the browser's socket.
+// agents.assemblyai.com is geo-routed and stored agents live in one region:
+// Vercel (US) created every agent in the US while a browser in Asia was
+// routed to the EU, where it did not exist -> agent_not_found on every call.
+const AGENTS_HOST = 'agents.us.assemblyai.com';
+const AGENTS_URL = `https://${AGENTS_HOST}/v1/agents`;
+const TOKEN_URL = `https://${AGENTS_HOST}/v1/token`;
+export const WS_URL = `wss://${AGENTS_HOST}/v1/ws`;
 
 function env(name: string) {
   const v = process.env[name];
@@ -84,9 +90,8 @@ export async function createAgent(room: string, menu: MenuItem[]): Promise<strin
   return data.id;
 }
 
-/** A new stored agent is not visible to the session endpoint right away:
- *  on Vercel (close to AssemblyAI) the browser connected before it was and
- *  got agent_not_found every time. Wait until it reads back. */
+/** Belt and braces: confirm a new stored agent reads back before the
+ *  browser is told to connect to it. */
 async function untilReadable(id: string) {
   for (let i = 0; i < 20; i++) {
     const res = await fetch(`${AGENTS_URL}/${id}`, {

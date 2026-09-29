@@ -15,7 +15,6 @@ import type { MenuItem } from './menu';
 import { clientId, fingerprint } from './visitor';
 import type { Cmd, Paths } from '../sim/engine';
 
-const WS_URL = 'wss://agents.assemblyai.com/v1/ws';
 const TERMINAL = ['DONE', 'AT_DESK'];
 
 export type CallStatus = 'connecting' | 'live' | 'ended' | 'error';
@@ -69,8 +68,8 @@ export async function startCall(room: string, hooks: CallHooks): Promise<Call> {
     mic.getTracks().forEach((t) => t.stop());
     throw new Error(start.error ?? `call could not start (${res.status})`);
   }
-  const { session_id: sessionId, agent_id: agentId, token, menu, seconds } =
-    start as { session_id: string; agent_id: string; token: string; menu: MenuItem[]; seconds: number };
+  const { session_id: sessionId, agent_id: agentId, token, ws_url: wsUrl, menu, seconds } =
+    start as { session_id: string; agent_id: string; token: string; ws_url: string; menu: MenuItem[]; seconds: number };
   const paths: Paths = await (await fetch('/sim/waypoints.json')).json();
 
   // ---- audit trail, batched ------------------------------------------------
@@ -124,7 +123,7 @@ export async function startCall(room: string, hooks: CallHooks): Promise<Call> {
   const drained = (limitMs: number) => new Promise<void>((r) => { drainedResolve = r; setTimeout(r, limitMs); });
 
   // ---- the session ------------------------------------------------------------
-  const ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
+  const ws = new WebSocket(`${wsUrl}?token=${encodeURIComponent(token)}`);
   const sendWs = (m: unknown) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
   micNode.port.onmessage = (e) => { if (ready) sendWs({ type: 'input.audio', audio: b64(e.data) }); };
 

@@ -91,7 +91,7 @@ const mirror = setInterval(() => {
 }, 500);
 const handlers = new ToolHandlers(start.menu, paths, (c) => engine.handle(c, data.time), snapshot, (e) => outbox.push(e));
 
-const ws = new WebSocket(`wss://agents.assemblyai.com/v1/ws?token=${encodeURIComponent(start.token)}`);
+const ws = new WebSocket(`${start.ws_url}?token=${encodeURIComponent(start.token)}`);
 const send = (m: unknown) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(m));
 let ready = false, replying = false, lastDone = 0, ended = false;
 let followups = 0; // tool results whose spoken reply has not finished yet
