@@ -80,7 +80,22 @@ export async function createAgent(room: string, menu: MenuItem[]): Promise<strin
     llm: [{ base_url: config.llm_base_url, model: config.llm_model, api_key: env('OPENROUTER_API_KEY') }],
   };
   const data = await assembly(AGENTS_URL, { method: 'POST', body: JSON.stringify(body) });
+  await untilReadable(data.id);
   return data.id;
+}
+
+/** A new stored agent is not visible to the session endpoint right away:
+ *  on Vercel (close to AssemblyAI) the browser connected before it was and
+ *  got agent_not_found every time. Wait until it reads back. */
+async function untilReadable(id: string) {
+  for (let i = 0; i < 20; i++) {
+    const res = await fetch(`${AGENTS_URL}/${id}`, {
+      headers: { Authorization: `Bearer ${env('ASSEMBLYAI_API_KEY')}` }, cache: 'no-store',
+    });
+    if (res.ok) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('AssemblyAI agent never became readable');
 }
 
 /** One-time browser token; the server ends the session at CALL_SECONDS. */
